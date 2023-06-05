@@ -16,6 +16,10 @@
 #include <Objbase.h>
 #endif
 
+#ifdef WINRT_XBOX
+#include <winrt/base.h>
+#endif
+
 // ~10 ms - needs to be at least 240 for surround
 constexpr u32 BUFFER_SAMPLES = 512;
 
@@ -43,9 +47,16 @@ CubebStream::CubebStream()
   Common::Event sync_event;
   m_work_queue.Push([this, &sync_event] {
     Common::ScopeGuard sync_event_guard([&sync_event] { sync_event.Set(); });
+#ifdef WINRT_XBOX
+    winrt::init_apartment();
+    m_coinit_success = true;
+    m_should_couninit = true;
+#else
     auto const result = CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+#endif
     m_coinit_success = result == S_OK;
     m_should_couninit = result == S_OK || result == S_FALSE;
+#endif
   });
   sync_event.Wait();
 }

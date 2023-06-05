@@ -23,6 +23,10 @@ class Context::Impl
 public:
   Impl()
   {
+#ifdef WINRT_XBOX
+    return;
+#endif
+
     const int ret = libusb_init(&m_context);
     if (ret != LIBUSB_SUCCESS)
     {
