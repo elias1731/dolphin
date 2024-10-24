@@ -6,7 +6,12 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ProjectReference Include="$(ExternalsDir)SDL\SDL3.vcxproj">
+    <ProjectReference Condition="'$(Platform)' == 'WinRT' Or '$(Platform)' == 'Xbox'" Include="$(ExternalsDir)SDL\SDL\VisualC-WinRT\SDL-UWP.vcxproj">
+      <Project>{8DC244EE-A0BD-4038-BAF7-CFAFA5EB2BAA}</Project>
+    </ProjectReference>
+    <ProjectReference Condition="'$(Platform)' != 'WinRT' And '$(Platform)' != 'Xbox'" Include="$(ExternalsDir)SDL\SDL3.vcxproj">
+      <Project>{8DC244EE-A0BD-4038-BAF7-CFAFA5EB2BAA}</Project>
+    </ProjectReference>
       <Project>{8DC244EE-A0BD-4038-BAF7-CFAFA5EB2BAA}</Project>
     </ProjectReference>
   </ItemGroup>

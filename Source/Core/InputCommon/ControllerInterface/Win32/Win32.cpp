@@ -51,8 +51,8 @@ _Pre_satisfies_(EventDataSize >= sizeof(CM_NOTIFY_EVENT_DATA)) static DWORD CALL
     {
       // TODO: we could easily use the message passed alongside this event, which tells
       // whether a device was added or removed, to avoid removing old, still connected, devices
-#ifndef WINRT_XBOX
       g_controller_interface.PlatformPopulateDevices([&] {
+#ifndef WINRT_XBOX
         ciface::DInput::PopulateDevices(
             static_cast<ciface::Win32::InputBackend*>(Context)->GetHWND());
 #endif
