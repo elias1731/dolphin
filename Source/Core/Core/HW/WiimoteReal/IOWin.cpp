@@ -382,12 +382,17 @@ bool CheckForToshibaStack(const DEVINST& hid_interface_device_instance)
 
   if (GetParentDevice(hid_interface_device_instance, &parent_device_info, &parent_device_data))
   {
+#ifndef WINRT_XBOX
     std::wstring class_driver_provider = Common::GetDeviceProperty(
         parent_device_info, &parent_device_data, &DEVPKEY_Device_DriverProvider);
 
     SetupDiDestroyDeviceInfoList(parent_device_info);
 
     return (class_driver_provider == L"TOSHIBA");
+#else
+    SetupDiDestroyDeviceInfoList(parent_device_info);
+    return false;  // UWP doesn't support device enumeration, assume not Toshiba stack
+#endif
   }
 
   DEBUG_LOG_FMT(WIIMOTE, "Unable to detect class driver provider!");
@@ -509,6 +514,7 @@ void WiimoteScannerWindows::FindWiimotes(std::vector<Wiimote*>& found_wiimotes,
     AttachWiimote(hRadio, rinfo, btdi);
   });
 
+#ifndef WINRT_XBOX
   // Get the device id
   GUID device_id;
   pHidD_GetHidGuid(&device_id);
@@ -556,6 +562,7 @@ void WiimoteScannerWindows::FindWiimotes(std::vector<Wiimote*>& found_wiimotes,
   }
 
   SetupDiDestroyDeviceInfoList(device_info);
+#endif
 }
 
 bool WiimoteScannerWindows::IsReady() const

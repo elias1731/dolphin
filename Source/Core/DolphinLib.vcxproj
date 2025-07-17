@@ -91,12 +91,14 @@
     <ClCompile Include="UICommon\ImGuiMenu\ImGuiMappingWindow.cpp" />
     <ClCompile Include="UICommon\ImGuiMenu\ImGuiNetplay.cpp" />
     <ClCompile Include="UICommon\ImGuiMenu\WinRTKeyboard.cpp" />
+    <ClCompile Include="VideoCommon\XboxUberShaderWorkarounds.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="UICommon\ImGuiMenu\ImGuiFrontend.h" />
     <ClInclude Include="UICommon\ImGuiMenu\ImGuiMappingWindow.h" />
     <ClInclude Include="UICommon\ImGuiMenu\ImGuiNetplay.h" />
     <ClInclude Include="UICommon\ImGuiMenu\WinRTKeyboard.h" />
+    <ClInclude Include="VideoCommon\XboxUberShaderWorkarounds.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

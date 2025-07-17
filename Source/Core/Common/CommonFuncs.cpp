@@ -6,11 +6,15 @@
 #include <cstddef>
 #include <cstring>
 #include <errno.h>
+#include <string>
 #include <type_traits>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#ifndef WINRT_XBOX
 #include <SetupAPI.h>
+#endif
 
 #define strerror_r(err, buf, len) strerror_s(buf, len, err)
 

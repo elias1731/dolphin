@@ -3099,7 +3099,7 @@ void DrawSettingsMenu(UIState* state, float frame_scale)
       break;
     case About:
       ImGui::TextWrapped(
-          "Dolphin Emulator on UWP - Version 1.1.9.0 (Based on Dolphin 2503a-340)\n\n"
+          "Dolphin Emulator on UWP - Version 1.1.9.1 (Based on Dolphin 2506-183)\n\n"
           "This is a fork of Dolphin Emulator introducing Xbox support with a big picture "
           "frontend\n\n"
           "Credits:\n\n"
@@ -3563,9 +3563,12 @@ void CreateAchievementsTab(UIState* state)
           static std::shared_ptr<AbstractTexture> profile_texture;
           static std::vector<u8> last_badge_data;
 
-          if (last_badge_data != player_badge.data)
+          const std::vector<u8> badge_data(player_badge.data.data(),
+                                           player_badge.data.data() + player_badge.data.size());
+
+          if (last_badge_data != badge_data)
           {
-            last_badge_data = player_badge.data;
+            last_badge_data = badge_data;
 
             TextureConfig config(player_badge.width, player_badge.height, 1, 1, 1,
                                  AbstractTextureFormat::RGBA8, 0, AbstractTextureType::Texture_2D);

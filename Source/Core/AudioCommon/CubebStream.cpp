@@ -47,13 +47,12 @@ CubebStream::CubebStream()
   Common::Event sync_event;
   m_work_queue.Push([this, &sync_event] {
     Common::ScopeGuard sync_event_guard([&sync_event] { sync_event.Set(); });
-#ifdef WINRT_XBOX
+#if defined(WINRT_XBOX)
     winrt::init_apartment();
     m_coinit_success = true;
     m_should_couninit = true;
 #else
-    auto const result = CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
-#endif
+    const auto result = CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
     m_coinit_success = result == S_OK;
     m_should_couninit = result == S_OK || result == S_FALSE;
 #endif
@@ -61,7 +60,8 @@ CubebStream::CubebStream()
   sync_event.Wait();
 }
 #else
-    = default;
+{
+}
 #endif
 
 bool CubebStream::Init()

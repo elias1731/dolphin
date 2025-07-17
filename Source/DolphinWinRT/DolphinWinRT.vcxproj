@@ -55,7 +55,7 @@
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
     <AppxAutoIncrementPackageRevision>False</AppxAutoIncrementPackageRevision>
     <GenerateTestArtifacts>True</GenerateTestArtifacts>
-    <AppxBundle>Auto</AppxBundle>
+    <AppxBundle>Always</AppxBundle>
     <AppxBundlePlatforms>x64</AppxBundlePlatforms>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
     <AppxSymbolPackageEnabled>True</AppxSymbolPackageEnabled>
@@ -130,113 +130,15 @@
     <ClCompile Include="App.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <Text Include="Sys\ApprovedInis.json">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
+    <!-- Non-Sys files -->
     <None Include="DolphinWinRT_TemporaryKey.pfx" />
     <None Include="packages.config" />
     <None Include="PropertySheet.props" />
-    <Text Include="readme.txt">
-      <DeploymentContent>false</DeploymentContent>
-    </Text>
-    <None Include="Sys\codehandler.bin">
+    <!-- All Sys files with proper deployment content setting -->
+    <Content Include="Sys\**\*.*">
       <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\GameSettings\*.ini">
-      <Link>Sys\GameSettings\%(Filename)%(Extension)</Link>
-      <DeploymentContent>true</DeploymentContent>
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Include="Sys\GC\dsp_coef.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\GC\dsp_rom.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\GC\font_japanese.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\GC\font_western.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Profiles\Wiimote\Classic.ini">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Profiles\Wiimote\Sideways.ini">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\totaldb.dsy">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\mbox\wc24recv.ctl">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\mbox\wc24recv.mbx">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\mbox\wc24send.ctl">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\mbox\wc24send.mbx">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\misc.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\nwc24dl.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\nwc24fl.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\nwc24fls.bin">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\nwc24msg.cbk">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <None Include="Sys\Wii\shared2\wc24\nwc24msg.cfg">
-      <DeploymentContent>true</DeploymentContent>
-    </None>
-    <Text Include="Sys\wiitdb-de.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-en.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-es.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-fr.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-it.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-ja.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-ko.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-nl.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-pt.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-ru.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-zh_CN.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\wiitdb-zh_TW.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
-    <Text Include="Sys\Wii\shared2\wc24\mbox\Readme.txt">
-      <DeploymentContent>true</DeploymentContent>
-    </Text>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="$(CoreDir)DolphinLib.vcxproj">
@@ -245,17 +147,6 @@
     <ProjectReference Include="$(ExternalsDir)SDL\SDL\VisualC-WinRT\SDL-UWP.vcxproj">
       <Project>{89e9b32e-a86a-47c3-a948-d2b1622925ce}</Project>
     </ProjectReference>
-  </ItemGroup>
-  <ItemGroup>
-    <Font Include="Sys\Resources\NotoSansJP-Regular.ttf" />
-    <Font Include="Sys\Resources\Roboto-Regular.ttf" />
-  </ItemGroup>
-  <ItemGroup>
-    <Content Include="..\..\Data\Sys\FrontendThemes\**\*.*">
-      <Link>Sys\FrontendThemes\%(RecursiveDir)%(Filename)%(Extension)</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <DeploymentContent>true</DeploymentContent>
-    </Content>
   </ItemGroup>
   <Import Project="$(ExternalsDir)bzip2\exports.props" />
   <Import Project="$(ExternalsDir)cpp-optparse\exports.props" />
