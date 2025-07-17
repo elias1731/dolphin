@@ -347,11 +347,8 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
                     OSD::Duration::NORMAL);
   }
 
-#ifndef WINRT_XBOX
   g_shader_cache->InitializeShaderCache();
-#ifndef WINRT_XBOX
   system.GetCustomResourceManager().Initialize();
-#endif
 
   return true;
 }

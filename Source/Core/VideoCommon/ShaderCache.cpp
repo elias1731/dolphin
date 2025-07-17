@@ -22,6 +22,10 @@
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
 
+#ifdef WINRT_XBOX
+#include "VideoCommon/XboxUberShaderWorkarounds.h"
+#endif
+
 #include <imgui.h>
 
 std::unique_ptr<VideoCommon::ShaderCache> g_shader_cache;
@@ -64,12 +68,24 @@ void ShaderCache::InitializeShaderCache()
 
   // Queue ubershader precompiling if required.
   if (g_ActiveConfig.UsingUberShaders())
+  {
+#ifdef WINRT_XBOX
+    // On Xbox, reduce the number of precompiler threads to avoid overwhelming the driver
+    m_async_shader_compiler->ResizeWorkerThreads(std::min(g_ActiveConfig.GetShaderPrecompilerThreads(), 2u));
+#endif
     QueueUberShaderPipelines();
+  }
 
   // Compile all known UIDs.
   CompileMissingPipelines();
+  
+#ifdef WINRT_XBOX
+  // On Xbox, always wait for shaders to compile before starting to avoid driver issues
+  WaitForAsyncCompiler();
+#else
   if (g_ActiveConfig.bWaitForShadersBeforeStarting)
     WaitForAsyncCompiler();
+#endif
 
   // Switch to the runtime shader compiler thread configuration.
   m_async_shader_compiler->ResizeWorkerThreads(g_ActiveConfig.GetShaderCompilerThreads());
@@ -1292,6 +1308,81 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
 
 void ShaderCache::QueueUberShaderPipelines()
 {
+#ifdef WINRT_XBOX
+  // On Xbox, the graphics driver has issues with large ubershader compilations.
+  // Apply Xbox-specific optimizations to reduce complexity and improve compatibility.
+  
+  // Create a simplified vertex format for Xbox compatibility
+  PortableVertexDeclaration dummy_vertex_decl = {};
+  dummy_vertex_decl.position.components = 4;
+  dummy_vertex_decl.position.type = ComponentFormat::Float;
+  dummy_vertex_decl.position.enable = true;
+  dummy_vertex_decl.stride = sizeof(float) * 4;
+  NativeVertexFormat* dummy_vertex_format =
+      VertexLoaderManager::GetUberVertexFormat(dummy_vertex_decl);
+  
+  auto QueueEssentialPipeline =
+      [&](const UberShader::VertexShaderUid& vs_uid, const GeometryShaderUid& gs_uid,
+          const UberShader::PixelShaderUid& ps_uid, const BlendingState& blend) {
+        GXUberPipelineUid config;
+        config.vertex_format = dummy_vertex_format;
+        config.vs_uid = vs_uid;
+        config.gs_uid = gs_uid;
+        config.ps_uid = ps_uid;
+        config.rasterization_state = RenderState::GetCullBackFaceRasterizationState(
+            static_cast<PrimitiveType>(gs_uid.GetUidData()->primitive_type));
+        config.depth_state = RenderState::GetNoDepthTestingDepthState();
+        config.blending_state = blend;
+        
+        auto iter = m_gx_uber_pipeline_cache.find(config);
+        if (iter != m_gx_uber_pipeline_cache.end())
+          return;
+
+        auto& entry = m_gx_uber_pipeline_cache[config];
+        entry.second = false;
+      };
+
+  // On Xbox, only compile the most essential ubershader combinations to avoid driver issues
+  // This reduces the number of shader variants while still providing basic ubershader functionality
+  UberShader::EnumerateVertexShaderUids([&](const UberShader::VertexShaderUid& vuid) {
+    // Limit to a smaller subset of pixel shader UIDs for Xbox compatibility
+    UberShader::EnumeratePixelShaderUids([&](const UberShader::PixelShaderUid& puid) {
+      if (vuid.GetUidData()->num_texgens != puid.GetUidData()->num_texgens)
+        return;
+
+      UberShader::PixelShaderUid cleared_puid = puid;
+      UberShader::ClearUnusedPixelShaderUidBits(m_api_type, m_host_config, &cleared_puid);
+      
+      // Only use passthrough geometry shaders on Xbox to reduce complexity
+      EnumerateGeometryShaderUids([&](const GeometryShaderUid& guid) {
+        if (guid.GetUidData()->numTexGens != vuid.GetUidData()->num_texgens ||
+            !guid.GetUidData()->IsPassthrough())
+        {
+          return;
+        }
+        
+        // Use Xbox-specific filtering to determine which shaders to precompile
+        if (!XboxPrecompiledShaders::ShouldPrecompileShader(vuid, guid, cleared_puid))
+          return;
+        
+        // Use simplified blending state for Xbox compatibility
+        BlendingState blend = RenderState::GetNoBlendingBlendState();
+        QueueEssentialPipeline(vuid, guid, cleared_puid, blend);
+        
+        // Only compile a minimal set of additional variants on Xbox
+        if (!cleared_puid.GetUidData()->no_dual_src && !cleared_puid.GetUidData()->uint_output)
+        {
+          blend.blendenable = true;
+          blend.usedualsrc = true;
+          blend.srcfactor = SrcBlendFactor::SrcAlpha;
+          blend.dstfactor = DstBlendFactor::InvSrcAlpha;
+          QueueEssentialPipeline(vuid, guid, cleared_puid, blend);
+        }
+      });
+    });
+  });
+#else
+  // Standard ubershader for non-Xbox platforms
   // Create a dummy vertex format with no attributes.
   // All attributes will be enabled in GetUberVertexFormat.
   PortableVertexDeclaration dummy_vertex_decl = {};
@@ -1385,6 +1476,7 @@ void ShaderCache::QueueUberShaderPipelines()
       });
     });
   });
+#endif
 }
 
 const AbstractPipeline*
