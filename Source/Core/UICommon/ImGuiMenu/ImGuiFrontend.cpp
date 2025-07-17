@@ -13,11 +13,61 @@
 #include "WinRTKeyboard.h"
 
 #include <fmt/format.h>
+#include <format>
 
 #include <atomic>
 #include <cctype>
 #include <memory>
 #include <thread>
+
+#include <imgui.h>
+#include <imgui_internal.h>
+
+#include "Core/AchievementManager.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Config/UISettings.h"
+#include "Core/ConfigManager.h"
+#include "Core/Core.h"
+#include "Core/CoreTiming.h"
+#include "Core/GeckoCodeConfig.h"
+#include "Core/Movie.h"
+#include "Core/NetPlayProto.h"
+#include "Core/System.h"
+#include "Core/HW/GCPad.h"
+#include "Core/HW/ProcessorInterface.h"
+#include "Core/HW/Wiimote.h"
+#include "Core/HW/WiimoteEmu/Extension/Extension.h"
+
+#include "Common/CommonPaths.h"
+#include "Common/Config/Config.h"
+#include "Common/FileSearch.h"
+#include "Common/FileUtil.h"
+#include "Common/Image.h"
+#include "Common/Timer.h"
+
+#include "UICommon/GameFile.h"
+#include "UICommon/GameFileCache.h"
+#include "UICommon/UICommon.h"
+
+#include "VideoCommon/AbstractGfx.h"
+#include "VideoCommon/OnScreenUI.h"
+#include "VideoCommon/Present.h"
+#include "VideoCommon/VideoBackendBase.h"
+#include "VideoCommon/VideoConfig.h"
+
+#include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
+#include "InputCommon/ControllerEmu/ControlGroup/MixedTriggers.h"
+#include "InputCommon/ControllerInterface/DualShockUDPClient/DualShockUDPClient.h"
+#include "InputCommon/ControllerInterface/MappingCommon.h"
+#include "InputCommon/ControllerInterface/WGInput/WGInput.h"
+#include "InputCommon/InputConfig.h"
+
+#include "AudioCommon/AudioCommon.h"
+#include "AudioCommon/Enums.h"
+#include "AudioCommon/WASAPIStream.h"
+
+#include "ImGuiMappingWindow.h"
+#include "InputCommon/ControllerInterface/CoreDevice.h"
 
 #include <Windows.h>
 #include <imgui.h>
@@ -48,6 +98,7 @@
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/Config/UISettings.h"
 #include "Core/Config/WiimoteSettings.h"
+#include "Common/MsgHandler.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core/WiiUtils.h"
 #include "Core/HW/EXI/EXI_Device.h"
@@ -102,16 +153,11 @@
 #include "ImGuiMappingWindow.h"
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 
+#ifdef WINRT_XBOX
 namespace WGI = winrt::Windows::Gaming::Input;
 using winrt::Windows::UI::Core::CoreWindow;
 using namespace winrt;
-
-// Static handler for config changes (ImGui does not use QObject or signals/slots)
-void OnHardcoreChangedStatic()
-{
-  if (Config::Get(Config::RA_HARDCORE_ENABLED))
-    Config::SetBaseOrCurrent(Config::MAIN_ENABLE_DEBUGGING, false);
-}
+#endif
 
 static bool show_update_progress_modal = false;
 static std::atomic<bool> update_complete{false};
@@ -136,6 +182,147 @@ UIState m_state = UIState();
 CarouselCategory m_ccat = CarouselCategory::CAll;
 std::map<std::string, FrontendTheme> m_themes;
 FrontendTheme* m_selected_theme;
+
+static void ApplyColorTheme(int theme_index)
+{
+  ImGuiStyle& s = ImGui::GetStyle();
+  
+  switch (theme_index)
+  {
+    case 0: // Dark Theme
+      ImGui::StyleColorsDark();
+      break;
+    case 1: // Light Theme
+      ImGui::StyleColorsLight();
+      break;
+    case 2: // Classic Theme
+      ImGui::StyleColorsClassic();
+      break;
+    case 3: // Ocean Blue
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.11f, 0.15f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.04f, 0.12f, 0.18f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.08f, 0.20f, 0.28f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.15f, 0.35f, 0.45f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.20f, 0.45f, 0.60f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.55f, 0.70f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.12f, 0.28f, 0.38f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.18f, 0.38f, 0.50f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.22f, 0.45f, 0.58f, 1.00f);
+      break;
+    case 4: // Purple Night
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.05f, 0.15f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.15f, 0.08f, 0.20f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.25f, 0.12f, 0.35f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.35f, 0.20f, 0.50f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.45f, 0.25f, 0.65f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.55f, 0.30f, 0.75f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.28f, 0.15f, 0.40f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.38f, 0.20f, 0.55f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.45f, 0.25f, 0.65f, 1.00f);
+      break;
+    case 5: // Forest Green
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.12f, 0.08f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.18f, 0.12f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.28f, 0.18f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.20f, 0.45f, 0.25f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.60f, 0.35f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.70f, 0.40f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.15f, 0.38f, 0.20f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.20f, 0.50f, 0.28f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.25f, 0.58f, 0.35f, 1.00f);
+      break;
+    case 6: // Cherry Red
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.12f, 0.05f, 0.05f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.25f, 0.08f, 0.08f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.40f, 0.15f, 0.15f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.45f, 0.20f, 0.20f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.60f, 0.25f, 0.25f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.70f, 0.35f, 0.35f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.38f, 0.15f, 0.15f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.50f, 0.20f, 0.20f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.58f, 0.28f, 0.28f, 1.00f);
+      break;
+    case 7: // Amber Gold
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.12f, 0.10f, 0.05f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.25f, 0.20f, 0.08f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.40f, 0.32f, 0.12f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.45f, 0.35f, 0.15f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.60f, 0.45f, 0.25f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.70f, 0.55f, 0.35f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.38f, 0.30f, 0.12f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.50f, 0.40f, 0.22f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.58f, 0.48f, 0.32f, 1.00f);
+      s.Colors[ImGuiCol_Text] = ImVec4(0.90f, 0.85f, 0.70f, 1.00f);
+      break;
+    case 8: // Steel Blue
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.10f, 0.15f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.15f, 0.20f, 0.30f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.25f, 0.35f, 0.50f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.30f, 0.40f, 0.55f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.40f, 0.50f, 0.65f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.50f, 0.60f, 0.75f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.25f, 0.35f, 0.50f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.35f, 0.45f, 0.60f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.45f, 0.55f, 0.70f, 1.00f);
+      break;
+    case 9: // Sunset Orange
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.15f, 0.08f, 0.04f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.30f, 0.18f, 0.08f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.50f, 0.30f, 0.15f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.55f, 0.35f, 0.18f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.70f, 0.45f, 0.28f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.80f, 0.55f, 0.38f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.48f, 0.32f, 0.15f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.60f, 0.42f, 0.25f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.68f, 0.50f, 0.35f, 1.00f);
+      s.Colors[ImGuiCol_Text] = ImVec4(0.95f, 0.85f, 0.70f, 1.00f);
+      break;
+    case 10: // Cyber Pink
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.12f, 0.05f, 0.12f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.25f, 0.08f, 0.25f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.40f, 0.15f, 0.40f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.45f, 0.20f, 0.45f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.60f, 0.25f, 0.60f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.70f, 0.35f, 0.70f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.38f, 0.15f, 0.38f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.50f, 0.22f, 0.50f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.58f, 0.32f, 0.58f, 1.00f);
+      s.Colors[ImGuiCol_Text] = ImVec4(0.95f, 0.80f, 0.95f, 1.00f);
+      break;
+    case 11: // Mint Fresh
+      ImGui::StyleColorsDark();
+      s.Colors[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.12f, 0.10f, 0.94f);
+      s.Colors[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.25f, 0.20f, 1.00f);
+      s.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.15f, 0.40f, 0.32f, 1.00f);
+      s.Colors[ImGuiCol_Button] = ImVec4(0.20f, 0.45f, 0.35f, 0.60f);
+      s.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.60f, 0.48f, 1.00f);
+      s.Colors[ImGuiCol_ButtonActive] = ImVec4(0.40f, 0.70f, 0.58f, 1.00f);
+      s.Colors[ImGuiCol_Header] = ImVec4(0.18f, 0.38f, 0.30f, 0.55f);
+      s.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.50f, 0.40f, 0.80f);
+      s.Colors[ImGuiCol_HeaderActive] = ImVec4(0.35f, 0.58f, 0.48f, 1.00f);
+      s.Colors[ImGuiCol_Text] = ImVec4(0.85f, 0.95f, 0.90f, 1.00f);
+      break;
+    default: // Default to Dark Theme
+      ImGui::StyleColorsDark();
+      break;
+  }
+}
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+void ImGuiFrontend::OnHardcoreChanged()
+{
+  if (Config::Get(Config::RA_HARDCORE_ENABLED))
+    Config::SetBaseOrCurrent(Config::MAIN_ENABLE_DEBUGGING, false);
+}
+#endif  // USE_RETRO_ACHIEVEMENTS
 
 ImGuiFrontend::ImGuiFrontend()
 {
@@ -232,17 +419,24 @@ ImGuiFrontend::ImGuiFrontend()
   LoadThemes();
 
 #ifdef USE_RETRO_ACHIEVEMENTS
-  // ImGui doesn't have a window handle, so pass nullptr
+#ifdef WINRT_XBOX
+  // Get the CoreWindow handle for UWP applications
+  CoreWindow window = CoreWindow::GetForCurrentThread();
+  void* window_handle = winrt::get_abi(window);
+  AchievementManager::GetInstance().Init(reinterpret_cast<void*>(window_handle));
+#else
+  // ImGui doesn't have a window handle, so pass nullptr for other platforms
   AchievementManager::GetInstance().Init(nullptr);
+#endif
   // Disable debug mode if hardcore is active
   if (AchievementManager::GetInstance().IsHardcoreModeActive())
     Config::SetBaseOrCurrent(Config::MAIN_ENABLE_DEBUGGING, false);
-  // Listen for config changes to RA_ENABLED or RA_HARDCORE_ENABLED
-  m_config_changed_callback_id =
-      Config::AddConfigChangedCallback([]() { OnHardcoreChangedStatic(); });
-  // If hardcore is enabled at startup, ensure we react
+  // This needs to trigger on both RA_HARDCORE_ENABLED and RA_ENABLED
+  m_config_changed_callback_id = Config::AddConfigChangedCallback(
+      [this] { this->OnHardcoreChanged(); });
+  // If hardcore is enabled when the emulator starts, make sure it turns off what it needs to
   if (Config::Get(Config::RA_HARDCORE_ENABLED))
-    OnHardcoreChangedStatic();
+    OnHardcoreChanged();
 #endif  // USE_RETRO_ACHIEVEMENTS
 
   m_ccat = (CarouselCategory)Config::Get(Config::FRONTEND_LAST_CATEGORY);
@@ -253,6 +447,10 @@ ImGuiFrontend::ImGuiFrontend()
 
   if (m_selectedGameIdx >= m_displayed_games.size() || m_selectedGameIdx < 0)
     m_selectedGameIdx = 0;
+    
+  // Apply saved color theme
+  int saved_color_theme = Config::Get(Config::FRONTEND_COLOR_THEME);
+  ApplyColorTheme(saved_color_theme);
 }
 
 void ImGuiFrontend::PopulateControls()
@@ -765,6 +963,93 @@ void CreateInterfaceTab(UIState* state)
     }
 
     ImGui::EndCombo();
+  }
+
+  ImGui::Spacing();
+
+  // Color Theme Selection
+  static int current_theme = Config::Get(Config::FRONTEND_COLOR_THEME);
+  const char* theme_names[] = {
+    "Dark Theme", "Light Theme", "Classic Theme", "Ocean Blue", "Purple Night", 
+    "Forest Green", "Cherry Red", "Amber Gold", "Steel Blue", "Sunset Orange", 
+    "Cyber Pink", "Mint Fresh"
+  };
+  
+  if (ImGui::Combo("Color Theme", &current_theme, theme_names, IM_ARRAYSIZE(theme_names)))
+  {
+    ApplyColorTheme(current_theme);
+    
+    // Save the selection to config
+    Config::SetBaseOrCurrent(Config::FRONTEND_COLOR_THEME, current_theme);
+    Config::Save();
+  }
+
+  ImGui::Spacing();
+
+  bool useTitleDatabase = Config::Get(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE);
+  if (ImGui::Checkbox("Use Built-In Database of Game Names", &useTitleDatabase))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE, useTitleDatabase);
+    Config::Save();
+  }
+  ImGui::TextWrapped("Use Dolphin's built-in database of game names instead of reading from "
+                     "the game files.\n\nIf unsure, leave this checked.");
+
+  bool disableScreensaver = Config::Get(Config::MAIN_DISABLE_SCREENSAVER);
+  if (ImGui::Checkbox("Disable Screensaver", &disableScreensaver))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_DISABLE_SCREENSAVER, disableScreensaver);
+    Config::Save();
+  }
+  ImGui::TextWrapped("Disable the system screensaver while Dolphin is running.\n\n"
+                     "If unsure, leave this checked.");
+
+  bool focusedHotkeys = Config::Get(Config::MAIN_FOCUSED_HOTKEYS);
+  if (ImGui::Checkbox("Hotkeys Require Window Focus", &focusedHotkeys))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_FOCUSED_HOTKEYS, focusedHotkeys);
+    Config::Save();
+  }
+  ImGui::TextWrapped("When checked, hotkeys will only work when Dolphin has focus.\n\n"
+                     "If unsure, leave this checked.");
+
+  bool confirmOnStop = Config::Get(Config::MAIN_CONFIRM_ON_STOP);
+  if (ImGui::Checkbox("Confirm on Stop", &confirmOnStop))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_CONFIRM_ON_STOP, confirmOnStop);
+    Config::Save();
+  }
+  ImGui::TextWrapped("Show a confirmation dialog when stopping emulation.\n\n"
+                     "If unsure, leave this checked.");
+
+  bool timeTracking = Config::Get(Config::MAIN_TIME_TRACKING);
+  if (ImGui::Checkbox("Enable Play Time Tracking", &timeTracking))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_TIME_TRACKING, timeTracking);
+    Config::Save();
+  }
+  ImGui::TextWrapped("Track play time for games.\n\n"
+                     "If unsure, leave this checked.");
+
+  if (ImGui::CollapsingHeader("Advanced Interface Options"))
+  {
+    bool usePanicHandlers = Config::Get(Config::MAIN_USE_PANIC_HANDLERS);
+    if (ImGui::Checkbox("Use Panic Handlers", &usePanicHandlers))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_USE_PANIC_HANDLERS, usePanicHandlers);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Handle panic events (crashes) internally instead of letting the OS handle them. "
+                       "Useful for debugging.\n\nIf unsure, leave this checked.");
+
+    bool keepWindowOnTop = Config::Get(Config::MAIN_KEEP_WINDOW_ON_TOP);
+    if (ImGui::Checkbox("Keep Window on Top", &keepWindowOnTop))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_KEEP_WINDOW_ON_TOP, keepWindowOnTop);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Keep the Dolphin window on top of other windows.\n\n"
+                       "If unsure, leave this unchecked.");
   }
 }
 
@@ -1419,7 +1704,7 @@ void CreateControlsTab(UIState* state)
           ImGui::TableNextColumn();
           CreateGCPort(i, devices);
           ImGui::TableNextColumn();
-          if (ImGui::Button(std::format("Map##gc{}", i).c_str(), ImVec2(-1, 0)))
+          if (ImGui::Button(fmt::format("Map##gc{}", i).c_str(), ImVec2(-1, 0)))
           {
             state->showMappingWindow = true;
             state->mappingWindowPort = i;
@@ -1445,7 +1730,7 @@ void CreateControlsTab(UIState* state)
           ImGui::TableNextColumn();
           CreateWiiPort(i, devices);
           ImGui::TableNextColumn();
-          if (ImGui::Button(std::format("Map##wii{}", i).c_str(), ImVec2(-1, 0)))
+          if (ImGui::Button(fmt::format("Map##wii{}", i).c_str(), ImVec2(-1, 0)))
           {
             state->showMappingWindow = true;
             state->mappingWindowPort = i;
@@ -1794,6 +2079,14 @@ void CreateWiiTab(UIState* state)
   }
   ImGui::TextWrapped("Enables PAL60 mode (480p) instead of standard PAL (576i) for PAL games.");
 
+  bool wiiScreensaver = Config::Get(Config::SYSCONF_SCREENSAVER);
+  if (ImGui::Checkbox("Enable Wii Screensaver", &wiiScreensaver))
+  {
+    Config::SetBaseOrCurrent(Config::SYSCONF_SCREENSAVER, wiiScreensaver);
+    Config::Save();
+  }
+  ImGui::TextWrapped("Enables the Wii system screensaver after a period of inactivity.");
+
   bool enable_wiilink = Config::Get(Config::MAIN_WII_WIILINK_ENABLE);
   if (ImGui::Checkbox("Enable WiiConnect24 via WiiLink", &enable_wiilink))
   {
@@ -2096,58 +2389,115 @@ void CreateAdvancedTab(UIState* state)
       Config::Save();
     }
 
+    bool mmuEnable = Config::Get(Config::MAIN_MMU);
+    if (ImGui::Checkbox("Enable MMU", &mmuEnable))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_MMU, mmuEnable);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Enables the Memory Management Unit, needed for some games. (ON = Compatible, "
+                       "OFF = Fast)\n\nIf unsure, leave this unchecked.");
+
+    bool pauseOnPanic = Config::Get(Config::MAIN_PAUSE_ON_PANIC);
+    if (ImGui::Checkbox("Pause on Panic", &pauseOnPanic))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_PAUSE_ON_PANIC, pauseOnPanic);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Pauses the emulation if a Read/Write or Unknown Instruction panic "
+                       "occurs.\nEnabling will affect performance.\nThe performance impact is the "
+                       "same as having Enable MMU on.\n\nIf unsure, leave this unchecked.");
+
+    bool accurateCPUCache = Config::Get(Config::MAIN_ACCURATE_CPU_CACHE);
+    if (ImGui::Checkbox("Enable Write-Back Cache (slow)", &accurateCPUCache))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_ACCURATE_CPU_CACHE, accurateCPUCache);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Enables emulation of the CPU write-back cache.\nEnabling will have a "
+                       "significant impact on performance.\nThis should be left disabled unless "
+                       "absolutely needed.\n\nIf unsure, leave this unchecked.");
+
+    if (ImGui::CollapsingHeader("Advanced CPU Options"))
+    {
+      bool jitFollowBranch = Config::Get(Config::MAIN_JIT_FOLLOW_BRANCH);
+      if (ImGui::Checkbox("JIT Follow Branch", &jitFollowBranch))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_JIT_FOLLOW_BRANCH, jitFollowBranch);
+        Config::Save();
+      }
+      ImGui::TextWrapped("Enables JIT to follow branches for optimization. Can improve performance "
+                         "in some cases.\n\nIf unsure, leave this unchecked.");
+
+      bool fastmem = Config::Get(Config::MAIN_FASTMEM);
+      if (ImGui::Checkbox("Enable Fastmem", &fastmem))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_FASTMEM, fastmem);
+        Config::Save();
+      }
+      ImGui::TextWrapped("Enables faster memory access by using virtual memory mapping. Can improve "
+                         "performance significantly.\n\nIf unsure, leave this checked.");
+
+      bool largeEntryPoints = Config::Get(Config::MAIN_LARGE_ENTRY_POINTS_MAP);
+      if (ImGui::Checkbox("Large Entry Points Map", &largeEntryPoints))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_LARGE_ENTRY_POINTS_MAP, largeEntryPoints);
+        Config::Save();
+      }
+      ImGui::TextWrapped("Uses a larger map for JIT entry points. Can improve performance for games "
+                         "with many functions.\n\nIf unsure, leave this unchecked.");
+    }
+
     ImGui::TreePop();
   }
 
-  bool mmuEnable = Config::Get(Config::MAIN_MMU);
-  if (ImGui::Checkbox("Enable MMU", &mmuEnable))
+  if (ImGui::TreeNode("Timing"))
   {
-    Config::SetBaseOrCurrent(Config::MAIN_MMU, mmuEnable);
-    Config::Save();
-  }
-  ImGui::TextWrapped("Enables the Memory Management Unit, needed for some games. (ON = Compatible, "
-                     "OFF = Fast)\n\nIf unsure, leave this unchecked.");
+    bool syncOnSkipIdle = Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE);
+    if (ImGui::Checkbox("Sync on Skip Idle", &syncOnSkipIdle))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_SYNC_ON_SKIP_IDLE, syncOnSkipIdle);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Synchronizes the GPU thread with the CPU thread when the CPU is idle.\nThis "
+                       "helps prevent desynchronization between the CPU and GPU, which can cause "
+                       "visual glitches or crashes.\n\nIf unsure, leave this checked.");
 
-  bool pauseOnPanic = Config::Get(Config::MAIN_PAUSE_ON_PANIC);
-  if (ImGui::Checkbox("Pause on Panic", &pauseOnPanic))
-  {
-    Config::SetBaseOrCurrent(Config::MAIN_PAUSE_ON_PANIC, pauseOnPanic);
-    Config::Save();
-  }
-  ImGui::TextWrapped("Pauses the emulation if a Read/Write or Unknown Instruction panic "
-                     "occurs.\nEnabling will affect performance.\nThe performance impact is the "
-                     "same as having Enable MMU on.\n\nIf unsure, leave this unchecked.");
+    bool emulateDiscSpeed = !Config::Get(Config::MAIN_FAST_DISC_SPEED);
+    if (ImGui::Checkbox("Emulate Disc Speed", &emulateDiscSpeed))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_FAST_DISC_SPEED, !emulateDiscSpeed);
+      Config::Save();
+    }
+    ImGui::TextWrapped(
+        "When checked, the emulator uses normal disc speed (ON = Stock, OFF = Fast).\nDisabling "
+        "emulation accelerates the disc transfer rate, removing loading times but may cause issues "
+        "with games that rely on precise timing.\n\nIf unsure, leave this checked.");
 
-  bool accurateCPUCache = Config::Get(Config::MAIN_ACCURATE_CPU_CACHE);
-  if (ImGui::Checkbox("Enable Write-Back Cache (slow)", &accurateCPUCache))
-  {
-    Config::SetBaseOrCurrent(Config::MAIN_ACCURATE_CPU_CACHE, accurateCPUCache);
-    Config::Save();
-  }
-  ImGui::TextWrapped("Enables emulation of the CPU write-back cache.\nEnabling will have a "
-                     "significant impact on performance.\nThis should be left disabled unless "
-                     "absolutely needed.\n\nIf unsure, leave this unchecked.");
+    bool correctTimeDrift = Config::Get(Config::MAIN_CORRECT_TIME_DRIFT);
+    if (ImGui::Checkbox("Correct Time Drift", &correctTimeDrift))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_CORRECT_TIME_DRIFT, correctTimeDrift);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Allow the emulated console to run fast after stutters, pursuing accurate "
+                       "overall elapsed time unless paused or speed-adjusted.\n\nThis may be useful "
+                       "for internet play.\n\nIf unsure, leave this unchecked.");
 
-  bool syncOnSkipIdle = Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE);
-  if (ImGui::Checkbox("Sync on Skip Idle", &syncOnSkipIdle))
-  {
-    Config::SetBaseOrCurrent(Config::MAIN_SYNC_ON_SKIP_IDLE, syncOnSkipIdle);
-    Config::Save();
-  }
-  ImGui::TextWrapped("Synchronizes the GPU thread with the CPU thread when the CPU is idle.\nThis "
-                     "helps prevent desynchronization between the CPU and GPU, which can cause "
-                     "visual glitches or crashes.\n\nIf unsure, leave this checked.");
+    if (ImGui::CollapsingHeader("Advanced Timing Options"))
+    {
+      int timingVariance = Config::Get(Config::MAIN_TIMING_VARIANCE);
+      if (ImGui::SliderInt("Timing Variance (ms)", &timingVariance, 0, 100))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_TIMING_VARIANCE, timingVariance);
+        Config::Save();
+      }
+      ImGui::TextWrapped("Simulates timing variance in the emulated system. Higher values add more "
+                         "randomness to timing.\n\nIf unsure, leave this at 0.");
+    }
 
-  bool emulateDiscSpeed = !Config::Get(Config::MAIN_FAST_DISC_SPEED);
-  if (ImGui::Checkbox("Emulate Disc Speed", &emulateDiscSpeed))
-  {
-    Config::SetBaseOrCurrent(Config::MAIN_FAST_DISC_SPEED, !emulateDiscSpeed);
-    Config::Save();
+    ImGui::TreePop();
   }
-  ImGui::TextWrapped(
-      "When checked, the emulator uses normal disc speed (ON = Stock, OFF = Fast).\nDisabling "
-      "emulation accelerates the disc transfer rate, removing loading times but may cause issues "
-      "with games that rely on precise timing.\n\nIf unsure, leave this checked.");
 
   if (ImGui::TreeNode("Clock Override"))
   {
@@ -2162,12 +2512,69 @@ void CreateAdvancedTab(UIState* state)
       Config::Save();
     }
 
-    float clockOverride = Config::Get(Config::MAIN_OVERCLOCK);
-    if (ImGui::SliderFloat("Emulated CPU Clock Speed Override", &clockOverride, 0.06f, 4.0f))
+    if (overclockEnable)
     {
-      Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK, clockOverride);
+      float clockOverride = Config::Get(Config::MAIN_OVERCLOCK);
+      if (ImGui::SliderFloat("Emulated CPU Clock Speed Override", &clockOverride, 0.01f, 4.0f))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK, clockOverride);
+        Config::Save();
+      }
+
+      // Display percentage and MHz like the Qt version
+      int percent = static_cast<int>(std::round(clockOverride * 100.0f));
+      // Base GameCube CPU clock is 486 MHz
+      int clock = static_cast<int>(std::round(clockOverride * 486.0f));
+      ImGui::Text("%d%% (%d MHz)", percent, clock);
+    }
+
+    ImGui::TextWrapped(
+        "Adjusts the emulated CPU's clock rate.\n\nOn games that have an unstable frame rate "
+        "despite full emulation speed, higher values can improve their performance, requiring a "
+        "powerful device. Lower values reduce the emulated console's performance, but improve the "
+        "emulation speed.\n\nWARNING: Changing this from the default (100%) can and will break "
+        "games and cause glitches. Do so at your own risk. Please do not report bugs that occur "
+        "with a non-default clock.\n\nIf unsure, leave this unchecked.");
+
+    ImGui::TreePop();
+  }
+
+  if (ImGui::TreeNode("VBI Frequency Override"))
+  {
+    ImGui::Text("WARNING: Changing this from the default (1.0 = 100%) can and will break\ngames "
+                "and cause glitches. Do so at your own risk. \nPlease do not report bugs that "
+                "occur with a non-default frequency.");
+
+    bool vbiOverclockEnable = Config::Get(Config::MAIN_VI_OVERCLOCK_ENABLE);
+    if (ImGui::Checkbox("Enable VBI Frequency Override", &vbiOverclockEnable))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_VI_OVERCLOCK_ENABLE, vbiOverclockEnable);
       Config::Save();
     }
+
+    if (vbiOverclockEnable)
+    {
+      float vbiOverclock = Config::Get(Config::MAIN_VI_OVERCLOCK);
+      if (ImGui::SliderFloat("VBI Frequency Override", &vbiOverclock, 0.01f, 5.0f))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_VI_OVERCLOCK, vbiOverclock);
+        Config::Save();
+      }
+
+      // Display percentage and VPS like the Qt version
+      int percent = static_cast<int>(std::round(vbiOverclock * 100.0f));
+      float vps = 59.94f * vbiOverclock;
+      ImGui::Text("%d%% (%.2f VPS)", percent, vps);
+    }
+
+    ImGui::TextWrapped(
+        "Adjusts the VBI frequency. Also adjusts the emulated CPU's clock rate, to keep it "
+        "relatively the same.\n\nMakes games run at a different frame rate, making the "
+        "emulation less demanding when lowered, or improving smoothness when increased. This "
+        "may affect gameplay speed, as it is often tied to the frame rate.\n\nWARNING: "
+        "Changing this from the default (100%) can and will break games and cause glitches. "
+        "Do so at your own risk. Please do not report bugs that occur with a non-default "
+        "frequency.\n\nIf unsure, leave this unchecked.");
 
     ImGui::TreePop();
   }
@@ -2397,7 +2804,7 @@ void CreatePathsTab(UIState* state)
 
 void CreateWiiPort(int index, std::vector<std::string> devices)
 {
-  if (ImGui::BeginChild(std::format("gc-wii-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
+  if (ImGui::BeginChild(fmt::format("gc-wii-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
                         true))
   {
     auto controller = Wiimote::GetConfig()->GetController(index);
@@ -2490,7 +2897,7 @@ void CreateWiiPort(int index, std::vector<std::string> devices)
 
 void CreateGCPort(int index, std::vector<std::string> devices)
 {
-  if (ImGui::BeginChild(std::format("gc-port-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
+  if (ImGui::BeginChild(fmt::format("gc-port-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
                         true))
   {
     auto controller = Pad::GetConfig()->GetController(index);
@@ -2674,7 +3081,7 @@ std::shared_ptr<UICommon::GameFile> ImGuiFrontend::CreateGameList()
     for (auto& game : games)
     {
       if (ImGui::Selectable(
-              std::format("{}##{}", game->GetName(m_title_database).c_str(), game->GetFilePath())
+              fmt::format("{}##{}", game->GetName(m_title_database).c_str(), game->GetFilePath())
                   .c_str()) &&
           timeSinceInit > 1500)
       {
@@ -3099,7 +3506,7 @@ void DrawSettingsMenu(UIState* state, float frame_scale)
       break;
     case About:
       ImGui::TextWrapped(
-          "Dolphin Emulator on UWP - Version 1.1.9.1 (Based on Dolphin 2506-183)\n\n"
+          "Dolphin Emulator on UWP - Version 1.1.9.1 (Based on Dolphin 2506-218)\n\n"
           "This is a fork of Dolphin Emulator introducing Xbox support with a big picture "
           "frontend\n\n"
           "Credits:\n\n"

@@ -7,9 +7,6 @@
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "VideoCommon/AbstractTexture.h"
 
-// Free function to handle hardcore mode config changes
-void OnHardcoreChangedStatic();
-
 namespace UICommon
 {
 class GameFile;
@@ -152,6 +149,10 @@ private:
   void RecurseFolderForGames(std::string path);
   void AddGameFolder(std::string path);
   bool TryInput(std::string expression, std::shared_ptr<ciface::Core::Device> device);
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+  void OnHardcoreChanged();
+#endif  // USE_RETRO_ACHIEVEMENTS
 
   AbstractTexture* GetOrCreateMissingTex();
   AbstractTexture* GetHandleForGame(std::shared_ptr<UICommon::GameFile> game);
