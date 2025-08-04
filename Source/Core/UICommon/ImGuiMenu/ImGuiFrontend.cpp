@@ -89,6 +89,7 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Common/Config/Config.h"
 #include "Core/BootManager.h"
 #include "Core/CommonTitles.h"
 #include "Core/Config/AchievementSettings.h"
@@ -159,6 +160,12 @@ using winrt::Windows::UI::Core::CoreWindow;
 using namespace winrt;
 #endif
 
+void OnHardcoreChangedStatic()
+{
+  if (Config::Get(Config::RA_HARDCORE_ENABLED))
+    Config::SetBaseOrCurrent(Config::MAIN_ENABLE_DEBUGGING, false);
+}
+
 static bool show_update_progress_modal = false;
 static std::atomic<bool> update_complete{false};
 static std::atomic<float> update_progress{0.0f};
@@ -172,8 +179,8 @@ namespace ImGuiFrontend
 constexpr const char* PROFILES_DIR = "Profiles/";
 std::vector<std::string> m_wiimote_profiles;
 std::string m_selected_wiimote_profile[] = {"", "", "", ""};
-std::vector<std::string> m_gc_profiles;
-std::string m_selected_gc_profile[] = {"", "", "", ""};
+static std::array<std::string, 4> m_selected_gc_profile = {"None", "None", "None", "None"};
+static std::vector<std::string> m_gc_profiles = {"None"};
 std::vector<std::string> m_paths;
 bool m_show_path_warning = false;
 float m_frame_scale = 1.0f;
@@ -852,6 +859,8 @@ FrontendResult ImGuiFrontend::RunMainLoop()
 
 void CreateGeneralTab(UIState* state)
 {
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
+
   bool dualCore = Config::Get(Config::MAIN_CPU_THREAD);
   if (ImGui::Checkbox("Dual Core", &dualCore))
   {
@@ -887,17 +896,22 @@ void CreateGeneralTab(UIState* state)
     Config::Save();
   }
 
-  // Create a list of display strings (e.g., 0.1x to 2.0x in 0.1 increments)
-  const char* speed_limit_items[] = {"0.1x", "0.2x", "0.3x", "0.4x", "0.5x", "0.6x", "0.7x",
-                                     "0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x",
-                                     "1.5x", "1.6x", "1.7x", "1.8x", "1.9x", "2.0x"};
+  // Create a list of display strings for speed limit
+  static const char* speed_limit_items[] = {
+    "Unlimited", 
+    "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%",
+    "100% (Normal Speed)",
+    "110%", "120%", "130%", "140%", "150%", "160%", "170%", "180%", "190%", "200%"
+  };
 
-  static int current_speed_index = 10;
-
+  // Get the current speed limit
+  float current_speed = Config::Get(Config::MAIN_EMULATION_SPEED);
+  static int current_speed_index = current_speed <= 0.0f ? 0 : static_cast<int>(current_speed * 10);
+  
   if (ImGui::Combo("Speed Limit", &current_speed_index, speed_limit_items,
                    IM_ARRAYSIZE(speed_limit_items)))
   {
-    float new_speed = current_speed_index * 0.1f;
+    float new_speed = current_speed_index <= 0 ? 0.0f : current_speed_index * 0.1f;
     Config::SetBaseOrCurrent(Config::MAIN_EMULATION_SPEED, new_speed);
     Config::Save();
   }
@@ -905,13 +919,13 @@ void CreateGeneralTab(UIState* state)
   const auto fallback = Config::Get(Config::MAIN_FALLBACK_REGION);
   if (ImGui::TreeNode("Fallback Region"))
   {
-    if (ImGui::RadioButton("NTSC JP", fallback == DiscIO::Region::NTSC_J))
+    if (ImGui::RadioButton("NTSC-J", fallback == DiscIO::Region::NTSC_J))
     {
       Config::SetBaseOrCurrent(Config::MAIN_FALLBACK_REGION, DiscIO::Region::NTSC_J);
       Config::Save();
     }
 
-    if (ImGui::RadioButton("NTSC NA", fallback == DiscIO::Region::NTSC_U))
+    if (ImGui::RadioButton("NTSC-U", fallback == DiscIO::Region::NTSC_U))
     {
       Config::SetBaseOrCurrent(Config::MAIN_FALLBACK_REGION, DiscIO::Region::NTSC_U);
       Config::Save();
@@ -929,7 +943,7 @@ void CreateGeneralTab(UIState* state)
       Config::Save();
     }
 
-    if (ImGui::RadioButton("NTSC Korea", fallback == DiscIO::Region::NTSC_K))
+    if (ImGui::RadioButton("NTSC-K", fallback == DiscIO::Region::NTSC_K))
     {
       Config::SetBaseOrCurrent(Config::MAIN_FALLBACK_REGION, DiscIO::Region::NTSC_K);
       Config::Save();
@@ -967,24 +981,27 @@ void CreateInterfaceTab(UIState* state)
 
   ImGui::Spacing();
 
-  // Color Theme Selection
-  static int current_theme = Config::Get(Config::FRONTEND_COLOR_THEME);
-  const char* theme_names[] = {
-    "Dark Theme", "Light Theme", "Classic Theme", "Ocean Blue", "Purple Night", 
-    "Forest Green", "Cherry Red", "Amber Gold", "Steel Blue", "Sunset Orange", 
-    "Cyber Pink", "Mint Fresh"
-  };
-  
-  if (ImGui::Combo("Color Theme", &current_theme, theme_names, IM_ARRAYSIZE(theme_names)))
-  {
-    ApplyColorTheme(current_theme);
+    // Color Theme Selection
+    static int current_theme = Config::Get(Config::FRONTEND_COLOR_THEME);
+    const char* theme_names[] = {
+      "Dark Theme", "Light Theme", "Classic Theme", "Ocean Blue", "Purple Night",
+      "Forest Green", "Cherry Red", "Amber Gold", "Steel Blue", "Sunset Orange",
+      "Cyber Pink", "Mint Fresh"
+    };
+
+    if (ImGui::Combo("Color Theme", &current_theme, theme_names, IM_ARRAYSIZE(theme_names)))
+    {
+      ApplyColorTheme(current_theme);
     
     // Save the selection to config
-    Config::SetBaseOrCurrent(Config::FRONTEND_COLOR_THEME, current_theme);
-    Config::Save();
-  }
-
-  ImGui::Spacing();
+      Config::SetBaseOrCurrent(Config::FRONTEND_COLOR_THEME, current_theme);
+      Config::Save();
+    }
+    if (ImGui::IsItemHovered())
+    {
+      ImGui::SetTooltip("Sets the style of Dolphin's user interface.\n"
+                       "If unsure, select Dark Theme.");
+    }
 
   bool useTitleDatabase = Config::Get(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE);
   if (ImGui::Checkbox("Use Built-In Database of Game Names", &useTitleDatabase))
@@ -1055,6 +1072,7 @@ void CreateInterfaceTab(UIState* state)
 
 void CreateGraphicsTab(UIState* state)
 {
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
   if (ImGui::TreeNode("General"))
   {
     // Add backend selection
@@ -1112,43 +1130,55 @@ void CreateGraphicsTab(UIState* state)
     }
 
     const char* aspect_items[] = {"Auto", "Force 16:9", "Force 4:3", "Stretch"};
-    int aspect_idx = 0;
-    auto aspect = Config::Get(Config::GFX_ASPECT_RATIO);
-    switch (aspect)
-    {
-    case AspectMode::Auto:
-      aspect_idx = 0;
-      break;
-    case AspectMode::ForceWide:
-      aspect_idx = 1;
-      break;
-    case AspectMode::ForceStandard:
-      aspect_idx = 2;
-      break;
-    case AspectMode::Stretch:
-      aspect_idx = 3;
-      break;
-    }
+        int aspect_idx = 0;
+        auto aspect = Config::Get(Config::GFX_ASPECT_RATIO);
+        switch (aspect)
+        {
+        case AspectMode::Auto:
+          aspect_idx = 0;
+          break;
+        case AspectMode::ForceWide:
+          aspect_idx = 1;
+          break;
+        case AspectMode::ForceStandard:
+          aspect_idx = 2;
+          break;
+        case AspectMode::Stretch:
+          aspect_idx = 3;
+          break;
+        case AspectMode::Custom:
+          aspect_idx = 4;
+          break;
+        case AspectMode::CustomStretch:
+          aspect_idx = 5;
+          break;
+        }
 
-    if (ImGui::Combo("Aspect Ratio", &aspect_idx, aspect_items, IM_ARRAYSIZE(aspect_items)))
-    {
-      switch (aspect_idx)
-      {
-      case 0:
-        Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Auto);
-        break;
-      case 1:
-        Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
-        break;
-      case 2:
-        Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::ForceStandard);
-        break;
-      case 3:
-        Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
-        break;
-      }
-      Config::Save();
-    }
+        if (ImGui::Combo("Aspect Ratio", &aspect_idx, aspect_items, IM_ARRAYSIZE(aspect_items)))
+        {
+          switch (aspect_idx)
+          {
+          case 0:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Auto);
+            break;
+          case 1:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
+            break;
+          case 2:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::ForceStandard);
+            break;
+          case 3:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+            break;
+          case 4:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::Custom);
+            break;
+          case 5:
+            Config::SetBaseOrCurrent(Config::GFX_ASPECT_RATIO, AspectMode::CustomStretch);
+            break;
+          }
+          Config::Save();
+        }
 
     const char* ir_items[] = {"Auto (Multiple of 640x528)",      "Native (640x528)",
                               "2x Native (1280x1056) for 720p",  "3x Native (1920x1584) for 1080p",
@@ -1165,55 +1195,52 @@ void CreateGraphicsTab(UIState* state)
 
     const char* shader_items[] = {"Synchronous", "Hybrid Ubershaders", "Exclusive Ubershaders",
                                   "Skip Drawing"};
-    int shader_idx = 0;
-    auto shader = Config::Get(Config::GFX_SHADER_COMPILATION_MODE);
-    switch (shader)
-    {
-    case ShaderCompilationMode::Synchronous:
-      shader_idx = 0;
-      break;
-    case ShaderCompilationMode::AsynchronousUberShaders:
-      shader_idx = 1;
-      break;
-    case ShaderCompilationMode::SynchronousUberShaders:
-      shader_idx = 2;
-      break;
-    case ShaderCompilationMode::AsynchronousSkipRendering:
-      shader_idx = 3;
-      break;
-    }
+        int shader_idx = 0;
+        auto shader = Config::Get(Config::GFX_SHADER_COMPILATION_MODE);
+        switch (shader)
+        {
+        case ShaderCompilationMode::Synchronous:
+          shader_idx = 0;
+          break;
+        case ShaderCompilationMode::SynchronousUberShaders:
+          shader_idx = 1;
+          break;
+        case ShaderCompilationMode::AsynchronousUberShaders:
+          shader_idx = 2;
+          break;
+        case ShaderCompilationMode::AsynchronousSkipRendering:
+          shader_idx = 3;
+          break;
+        }
 
-    if (ImGui::Combo("Shader Compilation Mode", &shader_idx, shader_items,
-                     IM_ARRAYSIZE(shader_items)))
-    {
-      switch (shader_idx)
-      {
-      case 0:
-        Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE,
-                                 ShaderCompilationMode::Synchronous);
-        break;
-      case 1:
-        Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE,
-                                 ShaderCompilationMode::AsynchronousUberShaders);
-        break;
-      case 2:
-        Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE,
-                                 ShaderCompilationMode::SynchronousUberShaders);
-        break;
-      case 3:
-        Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE,
-                                 ShaderCompilationMode::AsynchronousSkipRendering);
-        break;
-      }
-      Config::Save();
-    }
+        if (ImGui::Combo("Shader Compilation Mode", &shader_idx, shader_items, IM_ARRAYSIZE(shader_items)))
+        {
+          switch (shader_idx)
+          {
+          case 0:
+            Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::Synchronous);
+            break;
+          case 1:
+            Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::SynchronousUberShaders);
+            break;
+          case 2:
+            Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::AsynchronousUberShaders);
+            break;
+          case 3:
+            Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILATION_MODE, ShaderCompilationMode::AsynchronousSkipRendering);
+            break;
+          }
+          Config::Save();
+        }
+        ImGui::TextWrapped("Specialized: Ubershaders are never used. Hybrid: Ubershaders prevent stuttering during compilation. Exclusive: Always use ubershaders. Skip Drawing: Prevents stuttering by not rendering waiting objects.");
 
-    bool waitForCompile = Config::Get(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING);
-    if (ImGui::Checkbox("Compile Shaders Before Starting", &waitForCompile))
-    {
-      Config::SetBaseOrCurrent(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, waitForCompile);
-      Config::Save();
-    }
+        bool waitForCompile = Config::Get(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING);
+        if (ImGui::Checkbox("Compile Shaders Before Starting", &waitForCompile))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, waitForCompile);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Waits for all shaders to finish compiling before starting a game.");
 
     bool shaderCache = Config::Get(Config::GFX_SHADER_CACHE);
     if (ImGui::Checkbox("Shader Cache", &shaderCache))
@@ -1252,16 +1279,18 @@ void CreateGraphicsTab(UIState* state)
     if (ImGui::Checkbox("Force True Color", &forceTrueColor))
     {
       Config::SetBaseOrCurrent(Config::GFX_ENHANCE_FORCE_TRUE_COLOR, forceTrueColor);
-      Config::Save();
-    }
+          Config::Save();
+        }
+        ImGui::TextWrapped("Disables the blending of adjacent rows when copying the EFB. May improve quality in some cases.");
 
     bool arbitraryMipmapDetection = Config::Get(Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION);
     if (ImGui::Checkbox("Arbitrary Mipmap Detection", &arbitraryMipmapDetection))
     {
       Config::SetBaseOrCurrent(Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION,
                                arbitraryMipmapDetection);
-      Config::Save();
-    }
+          Config::Save();
+        }
+        ImGui::TextWrapped("Enables detection of arbitrary mipmaps, which some games use for special distance-based effects.");
 
     if (arbitraryMipmapDetection)
     {
@@ -1333,19 +1362,21 @@ void CreateGraphicsTab(UIState* state)
         Config::Save();
       }
 
-      bool ignoreFormatChanges = Config::Get(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES);
-      if (ImGui::Checkbox("Emulate Format Changes", &ignoreFormatChanges))
-      {
-        Config::SetBaseOrCurrent(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES, ignoreFormatChanges);
-        Config::Save();
-      }
+        bool ignoreFormatChanges = Config::Get(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES);
+        if (ImGui::Checkbox("Emulate Format Changes", &ignoreFormatChanges))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES, ignoreFormatChanges);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Emulates EFB format changes in software. Required for some games to render correctly.");
 
-      bool storeEfbCopies = Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM);
-      if (ImGui::Checkbox("Store EFB Copies to Texture Only", &storeEfbCopies))
-      {
-        Config::SetBaseOrCurrent(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, storeEfbCopies);
-        Config::Save();
-      }
+        bool storeEfbCopies = Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM);
+        if (ImGui::Checkbox("Store EFB Copies to Texture Only", &storeEfbCopies))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, storeEfbCopies);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Stores EFB copies in GPU texture objects instead of RAM. Improves performance but breaks some games.");
 
       bool deferEfbCopies = Config::Get(Config::GFX_HACK_DEFER_EFB_COPIES);
       if (ImGui::Checkbox("Defer EFB Copies to RAM", &deferEfbCopies))
@@ -1358,27 +1389,28 @@ void CreateGraphicsTab(UIState* state)
     }
 
     if (ImGui::TreeNode("Texture Cache"))
-    {
-      int accuracy = Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
-
-      int slider_index = 0;
-      if (accuracy == 512)
-        slider_index = 1;
-      else if (accuracy == 128)
-        slider_index = 2;
-
-      const char* accuracy_labels[] = {"Safe (0)", "Normal (512)", "Fast (128)"};
-      if (ImGui::Combo("Texture Cache Accuracy", &slider_index, accuracy_labels, 3))
       {
-        int new_accuracy = 0;
-        if (slider_index == 1)
-          new_accuracy = 512;
-        else if (slider_index == 2)
-          new_accuracy = 128;
+        int accuracy = Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
 
-        Config::SetBaseOrCurrent(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES, new_accuracy);
-        Config::Save();
-      }
+        int slider_index = 0;
+        if (accuracy == 512)
+          slider_index = 1;
+        else if (accuracy == 128)
+          slider_index = 2;
+
+        const char* accuracy_labels[] = {"Safe (0)", "Normal (512)", "Fast (128)"};
+        if (ImGui::Combo("Texture Cache Accuracy", &slider_index, accuracy_labels, 3))
+        {
+          int new_accuracy = 0;
+          if (slider_index == 1)
+            new_accuracy = 512;
+          else if (slider_index == 2)
+            new_accuracy = 128;
+
+          Config::SetBaseOrCurrent(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES, new_accuracy);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Adjusts how often the texture cache is invalidated. Safe provides most compatibility.");
 
       bool gpuTextureDecoding = Config::Get(Config::GFX_ENABLE_GPU_TEXTURE_DECODING);
       if (ImGui::Checkbox("GPU Texture Decoding", &gpuTextureDecoding))
@@ -1417,20 +1449,22 @@ void CreateGraphicsTab(UIState* state)
     }
 
     if (ImGui::TreeNode("Other"))
-    {
-      bool fastDepthCalculation = Config::Get(Config::GFX_FAST_DEPTH_CALC);
-      if (ImGui::Checkbox("Fast Depth Calculation", &fastDepthCalculation))
       {
-        Config::SetBaseOrCurrent(Config::GFX_FAST_DEPTH_CALC, fastDepthCalculation);
-        Config::Save();
-      }
+        bool fastDepthCalculation = Config::Get(Config::GFX_FAST_DEPTH_CALC);
+        if (ImGui::Checkbox("Fast Depth Calculation", &fastDepthCalculation))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_FAST_DEPTH_CALC, fastDepthCalculation);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Uses a less accurate algorithm to calculate depth values.");
 
-      bool disableBoundingBox = Config::Get(Config::GFX_HACK_BBOX_ENABLE);
-      if (ImGui::Checkbox("Enable Bounding Box", &disableBoundingBox))
-      {
-        Config::SetBaseOrCurrent(Config::GFX_HACK_BBOX_ENABLE, disableBoundingBox);
-        Config::Save();
-      }
+        bool enableBoundingBox = Config::Get(Config::GFX_HACK_BBOX_ENABLE);
+        if (ImGui::Checkbox("Enable Bounding Box", &enableBoundingBox))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_HACK_BBOX_ENABLE, enableBoundingBox);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Enables bounding box emulation. Required for some games.");
 
       bool vertexRounding = Config::Get(Config::GFX_HACK_VERTEX_ROUNDING);
       if (ImGui::Checkbox("Vertex Rounding", &vertexRounding))
@@ -1446,12 +1480,12 @@ void CreateGraphicsTab(UIState* state)
         Config::Save();
       }
 
-      bool viSkip = Config::Get(Config::GFX_HACK_VI_SKIP);
-      if (ImGui::Checkbox("VBI Skip", &viSkip))
-      {
-        Config::SetBaseOrCurrent(Config::GFX_HACK_VI_SKIP, viSkip);
-        Config::Save();
-      }
+        bool viSkip = Config::Get(Config::GFX_HACK_VI_SKIP);
+        if (ImGui::Checkbox("VBI Skip", &viSkip))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_HACK_VI_SKIP, viSkip);
+          Config::Save();
+        }
 
       ImGui::TreePop();
     }
@@ -1470,12 +1504,26 @@ void CreateGraphicsTab(UIState* state)
         Config::Save();
       }
 
+        bool showFTimes = Config::Get(Config::GFX_SHOW_FTIMES);
+        if (ImGui::Checkbox("Show Frame Times", &showFTimes))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_SHOW_FTIMES, showFTimes);
+          Config::Save();
+        }
+
       bool showVps = Config::Get(Config::GFX_SHOW_VPS);
       if (ImGui::Checkbox("Show VPS", &showVps))
       {
         Config::SetBaseOrCurrent(Config::GFX_SHOW_VPS, showVps);
         Config::Save();
       }
+
+        bool showVTimes = Config::Get(Config::GFX_SHOW_VTIMES);
+        if (ImGui::Checkbox("Show VI Times", &showVTimes))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_SHOW_VTIMES, showVTimes);
+          Config::Save();
+        }
 
       bool showSpeed = Config::Get(Config::GFX_SHOW_SPEED);
       if (ImGui::Checkbox("Show Speed", &showSpeed))
@@ -1497,6 +1545,20 @@ void CreateGraphicsTab(UIState* state)
         Config::SetBaseOrCurrent(Config::GFX_OVERLAY_STATS, overlayStats);
         Config::Save();
       }
+
+        bool projStats = Config::Get(Config::GFX_OVERLAY_PROJ_STATS);
+        if (ImGui::Checkbox("Show Projection Statistics", &projStats))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_OVERLAY_PROJ_STATS, projStats);
+          Config::Save();
+        }
+
+        bool scissorStats = Config::Get(Config::GFX_OVERLAY_SCISSOR_STATS);
+        if (ImGui::Checkbox("Show Scissor Statistics", &scissorStats))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_OVERLAY_SCISSOR_STATS, scissorStats);
+          Config::Save();
+        }
 
       bool logRenderTime = Config::Get(Config::GFX_LOG_RENDER_TIME_TO_FILE);
       if (ImGui::Checkbox("Log Render Time to File", &logRenderTime))
@@ -1635,13 +1697,37 @@ void CreateGraphicsTab(UIState* state)
       }
 
 #ifndef WINRT_XBOX  // This currently only works on the Vulkan backend
-      bool backendMultithreading = Config::Get(Config::GFX_BACKEND_MULTITHREADING);
-      if (ImGui::Checkbox("Backend Multithreading", &backendMultithreading))
-      {
-        Config::SetBaseOrCurrent(Config::GFX_BACKEND_MULTITHREADING, backendMultithreading);
-        Config::Save();
-      }
+        bool backendMultithreading = Config::Get(Config::GFX_BACKEND_MULTITHREADING);
+        if (ImGui::Checkbox("Backend Multithreading", &backendMultithreading))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_BACKEND_MULTITHREADING, backendMultithreading);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Enables multithreaded command submission. Currently only works with Vulkan backend.");
 #endif
+
+        int commandBufferInterval = Config::Get(Config::GFX_COMMAND_BUFFER_EXECUTE_INTERVAL);
+        if (ImGui::SliderInt("Command Buffer Execute Interval", &commandBufferInterval, 0, 1000))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_COMMAND_BUFFER_EXECUTE_INTERVAL, commandBufferInterval);
+          Config::Save();
+        }
+        ImGui::TextWrapped("Submits command buffers every N draw calls. Lower values may reduce latency.");
+
+        int shaderCompilerThreads = Config::Get(Config::GFX_SHADER_COMPILER_THREADS);
+        if (ImGui::SliderInt("Shader Compiler Threads", &shaderCompilerThreads, 1, 8))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_SHADER_COMPILER_THREADS, shaderCompilerThreads);
+          Config::Save();
+        }
+
+        int shaderPrecompilerThreads = Config::Get(Config::GFX_SHADER_PRECOMPILER_THREADS);
+        if (ImGui::SliderInt("Shader Precompiler Threads", &shaderPrecompilerThreads, -1, 8))
+        {
+          Config::SetBaseOrCurrent(Config::GFX_SHADER_PRECOMPILER_THREADS, shaderPrecompilerThreads);
+          Config::Save();
+        }
+        ImGui::TextWrapped("-1 = Automatic, 0 = Disabled, >0 = Specific number of threads");
 
       bool preferVsForLinePoint = Config::Get(Config::GFX_PREFER_VS_FOR_LINE_POINT_EXPANSION);
       if (ImGui::Checkbox("Prefer VS for Point/Line Expansion", &preferVsForLinePoint))
@@ -1853,7 +1939,7 @@ void CreateGameCubeTab(UIState* state)
     }
     if (!have_menu)
     {
-      ImGui::TextWrapped("Put IPL ROMs in User/GC/<region>.");
+      ImGui::TextWrapped("No GameCube BIOS found. Put IPL ROMs in User/GC/<region>/IPL.bin to enable IPL functionality.");
     }
 
     ImGui::TreePop();
@@ -2149,7 +2235,11 @@ void CreateWiiTab(UIState* state)
       Config::SetBaseOrCurrent(Config::MAIN_WII_SD_CARD, insert_sd_card);
       Config::Save();
     }
-    ImGui::TextWrapped("Supports SD and SDHC. Default size is 128 MB.");
+    if (ImGui::IsItemHovered())
+    {
+      ImGui::SetTooltip("Inserts a virtual SD card into the emulated Wii.\n"
+                       "If unsure, leave this checked.");
+    }
 
     bool allow_sd_writes = Config::Get(Config::MAIN_ALLOW_SD_WRITES);
     if (ImGui::Checkbox("Allow Writes to SD Card", &allow_sd_writes))
@@ -2239,12 +2329,23 @@ void CreateWiiTab(UIState* state)
       Config::SetBaseOrCurrent(Config::SYSCONF_SENSOR_BAR_POSITION, sensor_position);
       Config::Save();
     }
+    if (ImGui::IsItemHovered())
+    {
+      ImGui::SetTooltip("Sets the position of the sensor bar relative to the screen.\n"
+                       "If unsure, select Top.");
+    }
 
     int ir_sensitivity = Config::Get(Config::SYSCONF_SENSOR_BAR_SENSITIVITY);
     if (ImGui::SliderInt("IR Sensitivity", &ir_sensitivity, 1, 5))
     {
       Config::SetBaseOrCurrent(Config::SYSCONF_SENSOR_BAR_SENSITIVITY, ir_sensitivity);
       Config::Save();
+    }
+    if (ImGui::IsItemHovered())
+    {
+      ImGui::SetTooltip("Adjusts the sensitivity of the Wii Remote's IR sensor.\n"
+                       "Higher values increase sensitivity.\n"
+                       "If unsure, leave this at 3.");
     }
 
     int speaker_volume = Config::Get(Config::SYSCONF_SPEAKER_VOLUME);
@@ -2355,6 +2456,9 @@ void CreateWiiTab(UIState* state)
 
 void CreateAdvancedTab(UIState* state)
 {
+  // Use CPUThreadGuard to safely access config when dual core is enabled
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
+
   if (ImGui::TreeNode("CPU Options"))
   {
 #ifdef WINRT_XBOX
@@ -3504,9 +3608,12 @@ void DrawSettingsMenu(UIState* state, float frame_scale)
     case Advanced:
       CreateAdvancedTab(state);
       break;
+    case Achievements:
+      CreateAchievementsTab(state);
+      break;
     case About:
       ImGui::TextWrapped(
-          "Dolphin Emulator on UWP - Version 1.1.9.1 (Based on Dolphin 2506-218)\n\n"
+          "Dolphin Emulator on UWP - Version 1.1.9.1 Beta (Based on Dolphin 2506-218)\n\n"
           "This is a fork of Dolphin Emulator introducing Xbox support with a big picture "
           "frontend\n\n"
           "Credits:\n\n"
@@ -3516,9 +3623,6 @@ void DrawSettingsMenu(UIState* state, float frame_scale)
           "SirManglers Ko-Fi: https://ko-fi.com/sirmangler\n"
           "Sterns Ko-Fi: https://ko-fi.com/stern\n\n"
           "Dolphin Emulator is licensed under GPLv2+ and is not associated with Nintendo.");
-      break;
-    case Achievements:
-      CreateAchievementsTab(state);
       break;
     }
 
@@ -3812,6 +3916,9 @@ void CreateAudioTab(UIState* state)
 }
 void CreateAchievementsTab(UIState* state)
 {
+  // Use CPUThreadGuard to safely access config when dual core is enabled
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
+
 #ifdef USE_RETRO_ACHIEVEMENTS
   static bool integration_enabled = Config::Get(Config::RA_ENABLED);
   static bool hardcore_enabled = Config::Get(Config::RA_HARDCORE_ENABLED);

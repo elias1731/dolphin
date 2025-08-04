@@ -105,7 +105,7 @@ const std::string& GetScmRevStr()
 
 const std::string& GetScmRevGitStr()
 {
-  static const std::string scm_rev_git_str = "8ee64a84c7365b042f50e206d245b8a8464d1656";
+  static const std::string scm_rev_git_str = "b6be5ee5d3a9b26880d860c614f578e643caadd4";
   return scm_rev_git_str;
 }
 

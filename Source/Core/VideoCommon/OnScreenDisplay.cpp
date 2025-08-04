@@ -13,6 +13,7 @@
 #include <imgui.h>
 
 #include "UICommon/ImGuiMenu/ImGuiFrontend.h"
+#include "UICommon/ImGuiMenu/ImGuiNetplay.h"
 
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
@@ -21,7 +22,11 @@
 #include "Core/AchievementManager.h"
 #include "Core/Config/AchievementSettings.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/Core.h"
+#include "Core/HW/ProcessorInterface.h"
+#include "Core/Movie.h"
 #include "Core/State.h"
+#include "Core/System.h"
 #include "rcheevos/include/rc_api_runtime.h"
 
 #ifdef WINRT_XBOX
@@ -255,6 +260,15 @@ void DrawInGameMenu()
         if (ImGui::Button("Change Disc"))
         {
           UWP::PickDisc();
+        }
+
+        if (ImGui::Button("Reset"))
+        {
+          auto& system = Core::System::GetInstance();
+          auto& movie = system.GetMovie();
+          if (movie.IsRecordingInput())
+            movie.SetReset(true);
+          system.GetProcessorInterface().ResetButton_Tap();
         }
 
         if (ImGui::Button("Exit Game"))

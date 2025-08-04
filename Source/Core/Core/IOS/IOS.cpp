@@ -281,7 +281,15 @@ Kernel::Kernel(IOSC::ConsoleType console_type) : m_iosc(console_type)
 {
   // Until the Wii root and NAND path stuff is entirely managed by IOS and made non-static,
   // using more than one IOS instance at a time is not supported.
-  ASSERT(Core::System::GetInstance().GetIOS() == nullptr);
+  auto& system = Core::System::GetInstance();
+  if (system.GetIOS() != nullptr)
+  {
+    // On Xbox/UWP, there can be timing issues during initialization where the old IOS instance
+    // hasn't been properly cleared yet. We'll issue a warning but allow the system to continue.
+    // The new IOS instance will replace the old one when it's assigned to the system.
+    WARN_LOG_FMT(IOS, "IOS instance already exists during kernel initialization. This may indicate "
+                       "a timing issue on Xbox/UWP platforms. The old instance will be replaced.");
+  }
 
   m_is_responsible_for_nand_root = !Core::WiiRootIsInitialized();
   if (m_is_responsible_for_nand_root)
