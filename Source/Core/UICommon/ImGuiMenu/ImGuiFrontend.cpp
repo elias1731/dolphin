@@ -1,7 +1,5 @@
-// Copyright 2022 Dolphin Emulator Project
+// Copyright 2025 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
-
-#pragma once
 
 #include "ImGuiFrontend.h"
 
@@ -14,36 +12,29 @@
 
 #include <fmt/format.h>
 #include <format>
-
 #include <atomic>
 #include <cctype>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
-
-#include <imgui.h>
-#include <imgui_internal.h>
-
-#include "Core/AchievementManager.h"
-#include "Core/Config/MainSettings.h"
-#include "Core/Config/UISettings.h"
-#include "Core/ConfigManager.h"
-#include "Core/Core.h"
-#include "Core/CoreTiming.h"
-#include "Core/GeckoCodeConfig.h"
-#include "Core/Movie.h"
-#include "Core/NetPlayProto.h"
-#include "Core/System.h"
-#include "Core/HW/GCPad.h"
-#include "Core/HW/ProcessorInterface.h"
-#include "Core/HW/Wiimote.h"
-#include "Core/HW/WiimoteEmu/Extension/Extension.h"
+#include <unordered_map>
+#include <chrono>
 
 #include "Common/CommonPaths.h"
 #include "Common/Config/Config.h"
 #include "Common/FileSearch.h"
 #include "Common/FileUtil.h"
 #include "Common/Image.h"
+
 #include "Common/Timer.h"
+#include "Common/Config/Config.h"
+#include "Common/HttpRequest.h"
+#include "Common/IniFile.h"
+#include "Common/StringUtil.h"
+#include "Common/Version.h"
+#include "Common/MsgHandler.h"
+#include "Common/Logging/Log.h"
 
 #include "UICommon/GameFile.h"
 #include "UICommon/GameFileCache.h"
@@ -71,6 +62,7 @@
 
 #include <Windows.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include "../../../../Externals/tinygltf/tinygltf/stb_image.h"
 
@@ -87,9 +79,7 @@
 #include <unordered_map>
 #include <wil/com.h>
 
-#include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
-#include "Common/Config/Config.h"
 #include "Core/BootManager.h"
 #include "Core/CommonTitles.h"
 #include "Core/Config/AchievementSettings.h"
@@ -99,7 +89,6 @@
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/Config/UISettings.h"
 #include "Core/Config/WiimoteSettings.h"
-#include "Common/MsgHandler.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core/WiiUtils.h"
 #include "Core/HW/EXI/EXI_Device.h"
@@ -113,6 +102,24 @@
 #include "Core/System.h"
 #include "Core/TitleDatabase.h"
 #include "Core/WiiRoot.h"
+#include "Core/AchievementManager.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Config/UISettings.h"
+#include "Core/ConfigManager.h"
+#include "Core/Core.h"
+#include "Core/CoreTiming.h"
+#include "Core/GeckoCodeConfig.h"
+#include "Core/Movie.h"
+#include "Core/NetPlayProto.h"
+#include "Core/ActionReplay.h"
+#include "Core/ConfigLoaders/GameConfigLoader.h"
+#include "Core/PatchEngine.h"
+#include "Core/HW/GCPad.h"
+#include "Core/HW/ProcessorInterface.h"
+#include "Core/HW/Wiimote.h"
+#include "Core/HW/WiimoteEmu/Extension/Extension.h"
+
+#include "DiscIO/Enums.h"
 
 #include <rcheevos/include/rc_client_raintegration.h>
 #include "rcheevos/include/rc_api_info.h"
@@ -122,6 +129,7 @@
 #include "rcheevos/include/rc_error.h"
 #include "rcheevos/include/rc_hash.h"
 #include "rcheevos/include/rc_runtime.h"
+#include "rcheevos/include/rc_consoles.h"
 
 #include "Common/CommonPaths.h"
 #include "Common/Config/Config.h"
@@ -172,6 +180,415 @@ static std::atomic<float> update_progress{0.0f};
 static WiiUtils::UpdateResult async_res = WiiUtils::UpdateResult::Cancelled;
 static std::thread update_thread;
 static bool show_update_result_modal = false;
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+// Structure to cache achievement data for games not currently loaded
+struct GameAchievementData
+{
+  bool loaded = false;
+  bool loading = false;
+  bool hasAchievements = false;
+  u32 gameId = 0;
+  std::string gameTitle;
+  std::string errorMessage;
+  std::vector<rc_api_achievement_definition_t> achievements;
+  std::chrono::steady_clock::time_point loadTime;
+  
+  ~GameAchievementData()
+  {
+    // Clean up dynamically allocated strings in achievements
+    for (auto& achievement : achievements)
+    {
+      if (achievement.title) delete[] achievement.title;
+      if (achievement.description) delete[] achievement.description;
+      if (achievement.author) delete[] achievement.author;
+      if (achievement.badge_name) delete[] achievement.badge_name;
+      if (achievement.definition) delete[] achievement.definition;
+    }
+  }
+};
+
+// Cache for game achievement data
+static std::unordered_map<std::string, std::unique_ptr<GameAchievementData>> g_game_achievement_cache;
+static std::mutex g_cache_mutex;
+
+// Forward declarations
+void LoadAchievementDataForGame(const std::string& file_path, const std::string& game_id);
+void DrawSpinner(const char* label, float radius, float thickness, ImU32 color);
+
+// Async function to load achievement data for a game
+void LoadAchievementDataForGame(const std::string& file_path, const std::string& game_id)
+{
+#ifdef _WIN32
+  OutputDebugStringA(("LoadAchievementDataForGame called for: " + file_path + " (ID: " + game_id + ")\n").c_str());
+#endif
+
+  auto& achievement_manager = AchievementManager::GetInstance();
+  if (!achievement_manager.HasAPIToken())
+  {
+#ifdef _WIN32
+    OutputDebugStringA("LoadAchievementDataForGame: No API token available\n");
+#endif
+    // Mark as failed
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+      it->second->errorMessage = "Not logged in to RetroAchievements";
+    }
+    return;
+  }
+    
+  // Calculate game hash - try different methods
+  std::string game_hash;
+  
+#ifdef _WIN32
+  OutputDebugStringA("LoadAchievementDataForGame: Calculating hash...\n");
+#endif
+  
+  // First try using AchievementManager's hash calculation
+  try 
+  {
+    game_hash = AchievementManager::CalculateHash(file_path);
+#ifdef _WIN32
+    OutputDebugStringA(("Hash from AchievementManager: " + game_hash + "\n").c_str());
+#endif
+  }
+  catch (...)
+  {
+    game_hash = "";
+#ifdef _WIN32
+    OutputDebugStringA("AchievementManager::CalculateHash failed\n");
+#endif
+  }
+  
+  // If that fails, try using rc_hash directly
+  if (game_hash.empty() || game_hash == "0")
+  {
+#ifdef _WIN32
+    OutputDebugStringA("LoadAchievementDataForGame: Trying direct RC hash calculation...\n");
+#endif
+    // Try direct RC hash calculation for GameCube
+    char hash_buffer[33];
+    if (rc_hash_generate_from_file(hash_buffer, RC_CONSOLE_GAMECUBE, file_path.c_str()) != 0)
+    {
+      game_hash = std::string(hash_buffer);
+#ifdef _WIN32
+      OutputDebugStringA(("GameCube hash: " + game_hash + "\n").c_str());
+#endif
+    }
+    // If GameCube fails, try Wii
+    else if (rc_hash_generate_from_file(hash_buffer, RC_CONSOLE_WII, file_path.c_str()) != 0)
+    {
+      game_hash = std::string(hash_buffer);
+#ifdef _WIN32
+      OutputDebugStringA(("Wii hash: " + game_hash + "\n").c_str());
+#endif
+    }
+  }
+  
+  if (game_hash.empty() || game_hash == "0")
+  {
+#ifdef _WIN32
+    OutputDebugStringA("LoadAchievementDataForGame: Hash calculation failed completely\n");
+#endif
+    // Hash calculation failed - mark as no achievements
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+      it->second->errorMessage = "Failed to calculate game hash - file may be unsupported";
+      it->second->loadTime = std::chrono::steady_clock::now();
+    }
+    return;
+  }
+  
+#ifdef _WIN32
+  OutputDebugStringA(("LoadAchievementDataForGame: Final hash: " + game_hash + " (length: " + std::to_string(game_hash.length()) + ")\n").c_str());
+#endif
+    
+  // Mark as loading
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto& data = g_game_achievement_cache[game_id];
+    if (!data)
+      data = std::make_unique<GameAchievementData>();
+    data->loading = true;
+  }
+  
+  // Use RC API to resolve hash and fetch game data
+  rc_api_resolve_hash_request_t resolve_request = {};
+  resolve_request.game_hash = game_hash.c_str();
+  
+#ifdef _WIN32
+  OutputDebugStringA(("LoadAchievementDataForGame: Sending hash to server: " + game_hash + "\n").c_str());
+#endif
+  
+  rc_api_request_t api_request;
+  int result = rc_api_init_resolve_hash_request(&api_request, &resolve_request);
+  if (result != RC_OK)
+  {
+#ifdef _WIN32
+    OutputDebugStringA(("LoadAchievementDataForGame: Failed to init resolve hash request, result: " + std::to_string(result) + "\n").c_str());
+#endif
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    return;
+  }
+  
+#ifdef _WIN32
+  OutputDebugStringA(("LoadAchievementDataForGame: API URL: " + std::string(api_request.url) + "\n").c_str());
+#endif
+  
+  // Make HTTP request with longer timeout
+  Common::HttpRequest http_request;
+  // Note: SetTimeout may not be available, using default timeout
+  
+  auto http_response = http_request.Get(api_request.url, {{"User-Agent", Common::GetUserAgentStr()}});
+  rc_api_destroy_request(&api_request);
+  
+#ifdef _WIN32
+  if (http_response.has_value())
+  {
+    std::string response_str(reinterpret_cast<const char*>(http_response->data()), http_response->size());
+    OutputDebugStringA(("LoadAchievementDataForGame: Server response: " + response_str.substr(0, 200) + "...\n").c_str());
+  }
+  else
+  {
+    OutputDebugStringA("LoadAchievementDataForGame: No HTTP response received\n");
+  }
+#endif
+  
+  if (!http_response.has_value() || http_response->empty())
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+      it->second->errorMessage = "Failed to connect to RetroAchievements server";
+    }
+    return;
+  }
+  
+  // Process resolve hash response
+  rc_api_resolve_hash_response_t resolve_response;
+  result = rc_api_process_resolve_hash_response(&resolve_response, 
+      reinterpret_cast<const char*>(http_response->data()));
+  
+  if (result != RC_OK)
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    return;
+  }
+  
+  if (resolve_response.game_id == 0)
+  {
+#ifdef _WIN32
+    OutputDebugStringA("LoadAchievementDataForGame: Server returned game_id = 0 (no achievements for this game)\n");
+#endif
+    // No achievements for this game - this is normal for many games
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+      it->second->loadTime = std::chrono::steady_clock::now();
+    }
+    rc_api_destroy_resolve_hash_response(&resolve_response);
+    return;
+  }
+  
+  // Get user info for API credentials
+  auto* user_info = rc_client_get_user_info(achievement_manager.GetClient());
+  if (!user_info || !user_info->username || !user_info->token)
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    rc_api_destroy_resolve_hash_response(&resolve_response);
+    return;
+  }
+  
+  // Fetch game data
+  rc_api_fetch_game_data_request_t fetch_request = {};
+  fetch_request.username = user_info->username;
+  fetch_request.api_token = user_info->token;
+  fetch_request.game_id = resolve_response.game_id;
+  
+  rc_api_destroy_resolve_hash_response(&resolve_response);
+  
+  result = rc_api_init_fetch_game_data_request(&api_request, &fetch_request);
+  if (result != RC_OK)
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    return;
+  }
+  
+  // Make second HTTP request for game data
+  http_response = http_request.Get(api_request.url, {{"User-Agent", Common::GetUserAgentStr()}});
+  rc_api_destroy_request(&api_request);
+  
+  if (!http_response.has_value() || http_response->empty())
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    return;
+  }
+  
+  // Process game data response
+  rc_api_fetch_game_data_response_t game_data_response;
+  result = rc_api_process_fetch_game_data_response(&game_data_response, 
+      reinterpret_cast<const char*>(http_response->data()));
+      
+  if (result != RC_OK)
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (auto it = g_game_achievement_cache.find(game_id); it != g_game_achievement_cache.end())
+    {
+      it->second->loading = false;
+      it->second->loaded = true;
+      it->second->hasAchievements = false;
+    }
+    return;
+  }
+  
+  // Cache the achievement data
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto& data = g_game_achievement_cache[game_id];
+    if (!data)
+      data = std::make_unique<GameAchievementData>();
+      
+    data->loading = false;
+    data->loaded = true;
+    data->hasAchievements = (game_data_response.num_achievements > 0);
+    data->gameId = game_data_response.id;
+    data->gameTitle = game_data_response.title ? game_data_response.title : "";
+    data->loadTime = std::chrono::steady_clock::now();
+    
+#ifdef _WIN32
+    OutputDebugStringA(("LoadAchievementDataForGame: Found " + std::to_string(game_data_response.num_achievements) + " achievements for '" + data->gameTitle + "'\n").c_str());
+#endif
+    
+    // Copy achievement data (need to duplicate strings)
+    data->achievements.clear();
+    data->achievements.reserve(game_data_response.num_achievements);
+    
+    for (u32 i = 0; i < game_data_response.num_achievements; i++)
+    {
+      const auto& src = game_data_response.achievements[i];
+      rc_api_achievement_definition_t dst = {};
+      
+      dst.id = src.id;
+      dst.points = src.points;
+      dst.category = src.category;
+      dst.type = src.type;
+      dst.rarity = src.rarity;
+      dst.rarity_hardcore = src.rarity_hardcore;
+      dst.created = src.created;
+      dst.updated = src.updated;
+      
+      // Duplicate strings safely
+      if (src.title && strlen(src.title) > 0)
+      {
+        auto len = strlen(src.title) + 1;
+        auto* title = new char[len];
+        strcpy(title, src.title);
+        dst.title = title;
+      }
+      else
+      {
+        dst.title = nullptr;
+      }
+      
+      if (src.description && strlen(src.description) > 0)
+      {
+        auto len = strlen(src.description) + 1;
+        auto* desc = new char[len];
+        strcpy(desc, src.description);
+        dst.description = desc;
+      }
+      else
+      {
+        dst.description = nullptr;
+      }
+      
+      if (src.author && strlen(src.author) > 0)
+      {
+        auto len = strlen(src.author) + 1;
+        auto* author = new char[len];
+        strcpy(author, src.author);
+        dst.author = author;
+      }
+      else
+      {
+        dst.author = nullptr;
+      }
+      
+      if (src.badge_name && strlen(src.badge_name) > 0)
+      {
+        auto len = strlen(src.badge_name) + 1;
+        auto* badge = new char[len];
+        strcpy(badge, src.badge_name);
+        dst.badge_name = badge;
+      }
+      else
+      {
+        dst.badge_name = nullptr;
+      }
+      
+      if (src.definition && strlen(src.definition) > 0)
+      {
+        auto len = strlen(src.definition) + 1;
+        auto* def = new char[len];
+        strcpy(def, src.definition);
+        dst.definition = def;
+      }
+      else
+      {
+        dst.definition = nullptr;
+      }
+      
+      data->achievements.push_back(dst);
+    }
+  }
+  
+  rc_api_destroy_fetch_game_data_response(&game_data_response);
+}
+#endif  // USE_RETRO_ACHIEVEMENTS
 
 namespace ImGuiFrontend
 {
@@ -323,6 +740,133 @@ static void ApplyColorTheme(int theme_index)
   }
 }
 
+static void ApplyModernStyling()
+{
+  ImGuiStyle& style = ImGui::GetStyle();
+  
+  // Scale everything up for better visibility
+  style.ScaleAllSizes(1.2f);
+  
+  // Window styling with modern aesthetics
+  style.WindowRounding = 15.0f;
+  style.WindowBorderSize = 1.5f;
+  style.WindowPadding = ImVec2(20.0f, 20.0f);
+  style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+  style.WindowMinSize = ImVec2(300.0f, 150.0f);
+  
+  // Frame styling (includes buttons, checkboxes, inputs, etc)
+  style.FrameRounding = 10.0f;
+  style.FrameBorderSize = 0.0f;
+  style.FramePadding = ImVec2(16.0f, 12.0f);
+  
+  // Button specific styling
+  style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
+  
+  // Child window styling
+  style.ChildRounding = 10.0f;
+  style.ChildBorderSize = 1.5f;
+  
+  // Popup styling
+  style.PopupRounding = 10.0f;
+  style.PopupBorderSize = 1.5f;
+  
+  // Tab styling
+  style.TabRounding = 8.0f;
+  style.TabBorderSize = 0.0f;
+  
+  // Scrollbar styling for modern look
+  style.ScrollbarRounding = 15.0f;
+  style.ScrollbarSize = 20.0f;
+  
+  // Grab (slider) styling
+  style.GrabRounding = 10.0f;
+  style.GrabMinSize = 15.0f;
+  
+  // Improved spacing for cleaner look
+  style.ItemSpacing = ImVec2(12.0f, 8.0f);
+  style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+  
+  // Indentation
+  style.IndentSpacing = 25.0f;
+  
+  // Alpha settings for smooth transparency
+  style.Alpha = 1.0f;
+  style.DisabledAlpha = 0.6f;
+  
+  // Critical: Enable anti-aliasing for crisp text and shapes
+  style.AntiAliasedLines = true;
+  style.AntiAliasedLinesUseTex = true;
+  style.AntiAliasedFill = true;
+  
+  // Improve visual separation with modern separators
+  style.SeparatorTextBorderSize = 1.5f;
+  style.SeparatorTextAlign = ImVec2(0.5f, 0.5f);
+  style.SeparatorTextPadding = ImVec2(25.0f, 4.0f);
+  
+  // Improved borders and outlines
+  style.TabBorderSize = 0.0f;
+}
+
+// Helper function for creating modern styled buttons
+static bool StyledButton(const char* label, const ImVec2& size = ImVec2(0, 0), ImGuiButtonFlags flags = 0)
+{
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(20.0f, 14.0f));
+  
+  bool result = ImGui::ButtonEx(label, size, flags);
+  
+  ImGui::PopStyleVar(2);
+  return result;
+}
+
+// Helper function for creating primary action buttons with enhanced styling
+static bool PrimaryButton(const char* label, const ImVec2& size = ImVec2(0, 0))
+{
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.59f, 0.98f, 0.80f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.36f, 0.69f, 1.0f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.49f, 0.88f, 1.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(25.0f, 16.0f));
+  
+  bool result = ImGui::Button(label, size);
+  
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(3);
+  return result;
+}
+
+// Helper function for creating secondary action buttons
+static bool SecondaryButton(const char* label, const ImVec2& size = ImVec2(0, 0))
+{
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.5f, 0.5f, 0.60f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.6f, 0.6f, 0.80f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(20.0f, 14.0f));
+  
+  bool result = ImGui::Button(label, size);
+  
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(3);
+  return result;
+}
+
+// Helper function for creating danger/warning buttons
+static bool DangerButton(const char* label, const ImVec2& size = ImVec2(0, 0))
+{
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 0.80f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(20.0f, 14.0f));
+  
+  bool result = ImGui::Button(label, size);
+  
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(3);
+  return result;
+}
+
 #ifdef USE_RETRO_ACHIEVEMENTS
 void ImGuiFrontend::OnHardcoreChanged()
 {
@@ -382,7 +926,40 @@ ImGuiFrontend::ImGuiFrontend()
     }
   }
 
+  // On Xbox UWP, set a better default for Dual Core based on console model.
+  // - Xbox One/One S/One X: default ON (true)
+  // - Xbox Series S/X: default OFF (false)
+  // This only applies on first run (when the Base layer key is not present),
+  // so we do not override a user's explicit choice.
+#ifdef WINRT_XBOX
+  {
+    GAMING_DEVICE_MODEL_INFORMATION model_info = {};
+    if (SUCCEEDED(GetGamingDeviceModelInformation(&model_info)))
+    {
+      const bool is_series = (model_info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_S ||
+                              model_info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_X ||
+                              model_info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_X_DEVKIT);
+      const bool desired_default_dual_core = !is_series;  // true on Xbox One family, false on Series
+
+      const auto base_layer = Config::GetLayer(Config::LayerType::Base);
+      if (base_layer && !base_layer->Exists(Config::MAIN_CPU_THREAD.GetLocation()))
+      {
+        Config::SetBase(Config::MAIN_CPU_THREAD, desired_default_dual_core);
+        Config::Save();
+      }
+    }
+  }
+#endif
+
   ImGuiIO& io = ImGui::GetIO();
+  
+  // Configure ImGui for better text rendering and anti-aliasing
+  io.ConfigWindowsMoveFromTitleBarOnly = true;
+  io.ConfigWindowsResizeFromEdges = true;
+  
+  // Configure font rendering for better quality and larger scale
+  io.FontGlobalScale = 2.0f;  // Increase overall UI scale
+  
   ciface::WGInput::Init();
   g_controller_interface.RefreshDevices();
 
@@ -454,6 +1031,12 @@ ImGuiFrontend::ImGuiFrontend()
 
   if (m_selectedGameIdx >= m_displayed_games.size() || m_selectedGameIdx < 0)
     m_selectedGameIdx = 0;
+
+  // Initialize enhanced carousel system
+  m_carousel_scroll_offset = 0.0f;
+  m_target_scroll_offset = 0.0f;
+  m_game_info_fade_alpha = 1.0f;
+  m_game_selection_timer = 0.0f;
     
   // Apply saved color theme
   int saved_color_theme = Config::Get(Config::FRONTEND_COLOR_THEME);
@@ -503,9 +1086,10 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (!m_direction_pressed)
         {
-          m_selectedGameIdx = m_selectedGameIdx <= 0 ?
-                                  static_cast<int>(m_displayed_games.size()) - 1 :
-                                  m_selectedGameIdx - 1;
+          int new_index = m_selectedGameIdx <= 0 ?
+                              static_cast<int>(m_displayed_games.size()) - 1 :
+                              m_selectedGameIdx - 1;
+          SmoothScrollToGame(new_index);
           m_direction_pressed = true;
           break;
         }
@@ -516,9 +1100,10 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (!m_direction_pressed)
         {
-          m_selectedGameIdx = m_selectedGameIdx >= static_cast<int>(m_displayed_games.size()) - 1 ?
-                                  0 :
-                                  m_selectedGameIdx + 1;
+          int new_index = m_selectedGameIdx >= static_cast<int>(m_displayed_games.size()) - 1 ?
+                              0 :
+                              m_selectedGameIdx + 1;
+          SmoothScrollToGame(new_index);
           m_direction_pressed = true;
           break;
         }
@@ -529,9 +1114,10 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 200L)
         {
-          m_selectedGameIdx = m_selectedGameIdx <= 0 ?
-                                  static_cast<int>(m_displayed_games.size()) - 1 :
-                                  m_selectedGameIdx - 1;
+          int new_index = m_selectedGameIdx <= 0 ?
+                              static_cast<int>(m_displayed_games.size()) - 1 :
+                              m_selectedGameIdx - 1;
+          SmoothScrollToGame(new_index);
           m_scroll_last = std::chrono::high_resolution_clock::now();
           break;
         }
@@ -542,9 +1128,10 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 200L)
         {
-          m_selectedGameIdx = m_selectedGameIdx >= static_cast<int>(m_displayed_games.size()) - 1 ?
-                                  0 :
-                                  m_selectedGameIdx + 1;
+          int new_index = m_selectedGameIdx >= static_cast<int>(m_displayed_games.size()) - 1 ?
+                              0 :
+                              m_selectedGameIdx + 1;
+          SmoothScrollToGame(new_index);
           m_scroll_last = std::chrono::high_resolution_clock::now();
           break;
         }
@@ -555,7 +1142,7 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 250L)
         {
-          if (!m_state.showListView && !m_state.showSettingsWindow && g_netplay_dialog == nullptr)
+          if (!m_state.showListView && !m_state.showSettingsWindow && !m_state.showPropertiesWindow && g_netplay_dialog == nullptr)
           {
             int idx = -1 + (int)m_ccat;
             if (idx < 1)
@@ -574,7 +1161,7 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 250L)
         {
-          if (!m_state.showListView && !m_state.showSettingsWindow && g_netplay_dialog == nullptr)
+          if (!m_state.showListView && !m_state.showSettingsWindow && !m_state.showPropertiesWindow && g_netplay_dialog == nullptr)
           {
             int idx = 1 + (int)m_ccat;
             if (idx >= CCount)
@@ -593,17 +1180,14 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 500L)
         {
-          int i = m_selectedGameIdx - 10;
-          if (i < 0)
+          int new_index = m_selectedGameIdx - 10;
+          if (new_index < 0)
           {
             // wrap around, total games + -index
-            m_selectedGameIdx = static_cast<int>(m_displayed_games.size()) + i;
+            new_index = static_cast<int>(m_displayed_games.size()) + new_index;
           }
-          else
-          {
-            m_selectedGameIdx = i;
-          }
-
+          
+          SmoothScrollToGame(new_index);
           m_scroll_last = std::chrono::high_resolution_clock::now();
           break;
         }
@@ -614,17 +1198,14 @@ void ImGuiFrontend::RefreshControls(bool updateGameSelection)
       {
         if (timeSinceLastInput > 500L)
         {
-          int i = m_selectedGameIdx + 10;
-          if (i >= m_displayed_games.size())
+          int new_index = m_selectedGameIdx + 10;
+          if (new_index >= static_cast<int>(m_displayed_games.size()))
           {
             // wrap around, i - total games
-            m_selectedGameIdx = i - static_cast<int>(m_displayed_games.size());
+            new_index = new_index - static_cast<int>(m_displayed_games.size());
           }
-          else
-          {
-            m_selectedGameIdx = i;
-          }
-
+          
+          SmoothScrollToGame(new_index);
           m_scroll_last = std::chrono::high_resolution_clock::now();
           break;
         }
@@ -658,8 +1239,10 @@ FrontendResult ImGuiFrontend::RunMainLoop()
   bool done = false;
   while (!done)
   {
+#ifdef WINRT_XBOX
     CoreWindow::GetForCurrentThread().Dispatcher().ProcessEvents(
         winrt::Windows::UI::Core::CoreProcessEventsOption::ProcessAllIfPresent);
+#endif
 
     if (!m_state.controlsDisabled)
       RefreshControls(!m_state.showSettingsWindow);
@@ -682,9 +1265,9 @@ FrontendResult ImGuiFrontend::RunMainLoop()
 
           break;
         }
-        else if (TryInput("Button X", device))
+        else if (TryInput("Button Y", device))
         {
-          if (!m_state.menuPressed && !m_state.showSettingsWindow && !g_netplay_dialog)
+          if (!m_state.menuPressed && !m_state.showSettingsWindow && !m_state.showPropertiesWindow && !g_netplay_dialog)
           {
             m_state.showListView = !m_state.showListView;
             m_state.menuPressed = true;
@@ -692,9 +1275,25 @@ FrontendResult ImGuiFrontend::RunMainLoop()
 
           break;
         }
+        else if (TryInput("Button X", device))
+        {
+          if (!m_state.menuPressed && !m_state.showSettingsWindow && !m_state.showListView && 
+              !g_netplay_dialog && !m_displayed_games.empty())
+          {
+            // Open properties for currently selected game
+            m_state.showPropertiesWindow = !m_state.showPropertiesWindow;
+            if (m_state.showPropertiesWindow && m_selectedGameIdx < static_cast<int>(m_displayed_games.size()))
+            {
+              m_state.propertiesGame = m_displayed_games[m_selectedGameIdx];
+            }
+            m_state.menuPressed = true;
+          }
+
+          break;
+        }
         else if (TryInput("View", device))
         {
-          if (!m_state.menuPressed && !m_state.showListView && !m_state.showSettingsWindow)
+          if (!m_state.menuPressed && !m_state.showListView && !m_state.showSettingsWindow && !m_state.showPropertiesWindow)
           {
             if (g_netplay_dialog)
             {
@@ -751,8 +1350,8 @@ FrontendResult ImGuiFrontend::RunMainLoop()
                          ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav))
     {
-      ImGui::Image((ImTextureID)(intptr_t)m_selected_theme->GetBackground(m_state.currentBG).get(),
-                   ImGui::GetIO().DisplaySize);
+        ImGui::Image((ImTextureID)(intptr_t)m_selected_theme->GetBackground(m_state.currentBG).get(),
+                    ImGui::GetIO().DisplaySize);
 
       if (m_state.showListView)
       {
@@ -791,6 +1390,10 @@ FrontendResult ImGuiFrontend::RunMainLoop()
     {
       m_state.currentBG = BG_Menu;
 
+      // Block all input to background when settings window is open
+      ImGui::GetIO().WantCaptureMouse = true;
+      ImGui::GetIO().WantCaptureKeyboard = true;
+
       ImGui::SetNextWindowSize(ImVec2(700 * m_frame_scale, 425 * m_frame_scale));
       ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2 - (700 / 2) * m_frame_scale,
                                      ImGui::GetIO().DisplaySize.y / 2 - (425 / 2) * m_frame_scale));
@@ -801,6 +1404,10 @@ FrontendResult ImGuiFrontend::RunMainLoop()
         DrawSettingsMenu(&m_state, m_frame_scale);
         ImGui::End();
       }
+    }
+    else if (m_state.showPropertiesWindow && m_state.propertiesGame)
+    {
+      DrawPropertiesDialog(&m_state, m_frame_scale);
     }
     else if (m_state.showListView)
     {
@@ -992,6 +1599,7 @@ void CreateInterfaceTab(UIState* state)
     if (ImGui::Combo("Color Theme", &current_theme, theme_names, IM_ARRAYSIZE(theme_names)))
     {
       ApplyColorTheme(current_theme);
+      ApplyModernStyling();
     
     // Save the selection to config
       Config::SetBaseOrCurrent(Config::FRONTEND_COLOR_THEME, current_theme);
@@ -1770,6 +2378,164 @@ void CreateGraphicsTab(UIState* state)
   }
 }
 
+void CreateAudioTab(UIState* state)
+{
+  if (ImGui::CollapsingHeader("DSP Options"))
+  {
+    const char* dsp_items[] = {"HLE", "LLE Recompiler", "LLE Interpreter"};
+    int dsp_idx =
+        Config::Get(Config::MAIN_DSP_HLE) ? 0 : (Config::Get(Config::MAIN_DSP_JIT) ? 1 : 2);
+    if (ImGui::Combo("DSP Emulation Engine", &dsp_idx, dsp_items, IM_ARRAYSIZE(dsp_items)))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_DSP_HLE, dsp_idx == 0);
+      Config::SetBaseOrCurrent(Config::MAIN_DSP_JIT, dsp_idx == 1);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Selects how the Digital Signal Processor (DSP) is emulated. Determines how "
+                       "the audio is processed and what system features are available.");
+  }
+
+  if (ImGui::CollapsingHeader("Volume"))
+  {
+    int volume = Config::Get(Config::MAIN_AUDIO_MUTED) ? 0 : Config::Get(Config::MAIN_AUDIO_VOLUME);
+    if (ImGui::SliderInt("Volume", &volume, 0, 100))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, volume == 0);
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, volume);
+      Config::Save();
+      AudioCommon::UpdateSoundStream(Core::System::GetInstance());
+    }
+  }
+
+  if (ImGui::CollapsingHeader("Backend Settings"))
+  {
+    std::vector<std::string> backends = AudioCommon::GetSoundBackends();
+    std::string current_backend = Config::Get(Config::MAIN_AUDIO_BACKEND);
+    int backend_idx = 0;
+    for (size_t i = 0; i < backends.size(); ++i)
+    {
+      if (backends[i] == current_backend)
+      {
+        backend_idx = static_cast<int>(i);
+        break;
+      }
+    }
+
+    if (ImGui::Combo(
+            "Audio Backend", &backend_idx,
+            [](void* data, int idx, const char** out_text) {
+              auto* backends = static_cast<std::vector<std::string>*>(data);
+              *out_text = backends->at(idx).c_str();
+              return true;
+            },
+            &backends, static_cast<int>(backends.size())))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BACKEND, backends[backend_idx]);
+      Config::Save();
+    }
+
+#ifdef _WIN32
+    if (backends[backend_idx] == BACKEND_WASAPI)
+    {
+      std::vector<std::string> devices = WASAPIStream::GetAvailableDevices();
+      std::string current_device = Config::Get(Config::MAIN_WASAPI_DEVICE);
+      int device_idx = 0;
+      for (size_t i = 0; i < devices.size(); ++i)
+      {
+        if (devices[i] == current_device)
+        {
+          device_idx = static_cast<int>(i);
+          break;
+        }
+      }
+
+      if (ImGui::Combo(
+              "Output Device", &device_idx,
+              [](void* data, int idx, const char** out_text) {
+                auto* devices = static_cast<std::vector<std::string>*>(data);
+                *out_text = devices->at(idx).c_str();
+                return true;
+              },
+              &devices, static_cast<int>(devices.size())))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_WASAPI_DEVICE, devices[device_idx]);
+        Config::Save();
+      }
+    }
+#endif
+
+    if (AudioCommon::SupportsLatencyControl(backends[backend_idx]))
+    {
+      int latency = Config::Get(Config::MAIN_AUDIO_LATENCY);
+      if (ImGui::SliderInt("Latency", &latency, 0, 200))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_AUDIO_LATENCY, latency);
+        Config::Save();
+      }
+      ImGui::TextWrapped(
+          "Sets the audio latency in milliseconds. Higher values may reduce audio crackling.");
+    }
+  }
+#ifndef WINRT_XBOX  // TODO: Can't figure out how this one works will look into more if it's
+                    // requested or is required
+  if (ImGui::CollapsingHeader("Dolby Pro Logic II"))
+  {
+    bool dpl2 = Config::Get(Config::MAIN_DPL2_DECODER);
+    if (ImGui::Checkbox("Enable Dolby Pro Logic II", &dpl2))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_DPL2_DECODER, dpl2);
+      Config::Save();
+    }
+    ImGui::TextWrapped(
+        "Enables Dolby Pro Logic II emulation using 5.1 surround. Certain backends only.");
+    if (dpl2)
+    {
+      const char* quality_items[] = {"Lowest (Latency ~10 ms)", "Low (Latency ~20 ms)",
+                                     "High (Latency ~40 ms)", "Highest (Latency ~80 ms)"};
+      int quality_idx = static_cast<int>(Config::Get(Config::MAIN_DPL2_QUALITY));
+      if (ImGui::Combo("Decoding Quality", &quality_idx, quality_items,
+                       IM_ARRAYSIZE(quality_items)))
+      {
+        Config::SetBaseOrCurrent(Config::MAIN_DPL2_QUALITY,
+                                 static_cast<AudioCommon::DPL2Quality>(quality_idx));
+        Config::Save();
+      }
+      ImGui::TextWrapped("Adjusts the quality setting of the Dolby Pro Logic II decoder. Higher "
+                         "presets increases audio latency.");
+    }
+  }
+#endif
+
+  if (ImGui::CollapsingHeader("Audio Playback Settings"))
+  {
+    int buffer_size = Config::Get(Config::MAIN_AUDIO_BUFFER_SIZE);
+    if (ImGui::SliderInt("Audio Buffer Size", &buffer_size, 5, 100))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BUFFER_SIZE, buffer_size);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Sets the size of the audio buffer in milliseconds. Higher values may "
+                       "reduce audio crackling.");
+
+    bool fill_gaps = Config::Get(Config::MAIN_AUDIO_FILL_GAPS);
+    if (ImGui::Checkbox("Fill Gaps", &fill_gaps))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_FILL_GAPS, fill_gaps);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Fills gaps in audio playback to prevent audio crackling.");
+
+    bool mute_on_speed_limit = Config::Get(Config::MAIN_AUDIO_MUTE_ON_DISABLED_SPEED_LIMIT);
+    if (ImGui::Checkbox("Mute on Speed Limit", &mute_on_speed_limit))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTE_ON_DISABLED_SPEED_LIMIT,
+                               mute_on_speed_limit);
+      Config::Save();
+    }
+    ImGui::TextWrapped("Mutes audio when emulation speed is above 100%.");
+  }
+}
+
 void CreateControlsTab(UIState* state)
 {
   auto devices = g_controller_interface.GetAllDeviceStrings();
@@ -2148,7 +2914,7 @@ void CreateGameCubeTab(UIState* state)
 void CreateWiiTab(UIState* state)
 {
   static WiiUtils::UpdateResult last_res = WiiUtils::UpdateResult::Cancelled;
-  if (ImGui::Button("Load Wii System Menu") && !state->controlsDisabled)
+  if (PrimaryButton("Load Wii System Menu") && !state->controlsDisabled)
   {
     state->controlsDisabled = true;
     state->showSettingsWindow = false;
@@ -2999,921 +3765,6 @@ void CreateWiiPort(int index, std::vector<std::string> devices)
   ImGui::EndChild();
 }
 
-void CreateGCPort(int index, std::vector<std::string> devices)
-{
-  if (ImGui::BeginChild(fmt::format("gc-port-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
-                        true))
-  {
-    auto controller = Pad::GetConfig()->GetController(index);
-    auto default_device = controller->GetDefaultDevice().name;
-
-    ImGui::Text("GameCube Port %d", index + 1);
-
-    if (ImGui::BeginCombo("Device", default_device.c_str()))
-    {
-      for (auto device : devices)
-      {
-        if (ImGui::Selectable(device.c_str(), strcmp(default_device.c_str(), device.c_str()) == 0))
-        {
-          controller->SetDefaultDevice(device);
-          controller->UpdateReferences(g_controller_interface);
-          Pad::GetConfig()->SaveConfig();
-        }
-      }
-
-      ImGui::EndCombo();
-    }
-
-    if (ImGui::BeginCombo("Profile", m_selected_gc_profile[index].c_str()))
-    {
-      for (auto profile : m_gc_profiles)
-      {
-        if (ImGui::Selectable(profile.c_str(), m_selected_gc_profile[index] == profile))
-        {
-          m_selected_gc_profile[index] = profile;
-
-          if (m_selected_gc_profile[index] == "None")
-          {
-            // Loading an empty inifile section clears everything.
-            Common::IniFile::Section sec;
-
-            controller->LoadConfig(&sec);
-            controller->SetDefaultDevice(default_device);
-            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
-                                     SerialInterface::SIDevices::SIDEVICE_NONE);
-          }
-          else if (m_selected_gc_profile[index] == "Default")
-          {
-            controller->LoadDefaults(g_controller_interface);
-            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
-                                     SerialInterface::SIDevices::SIDEVICE_GC_CONTROLLER);
-          }
-          else
-          {
-            Common::IniFile ini;
-            ini.Load(File::GetUserPath(D_CONFIG_IDX) + PROFILES_DIR +
-                     Pad::GetConfig()->GetProfileDirectoryName() + "/" + profile + ".ini");
-
-            controller->LoadConfig(ini.GetOrCreateSection("Profile"));
-            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
-                                     SerialInterface::SIDevices::SIDEVICE_GC_CONTROLLER);
-          }
-
-          controller->UpdateReferences(g_controller_interface);
-          Pad::GetConfig()->SaveConfig();
-          Config::Save();
-        }
-      }
-
-      ImGui::EndCombo();
-    }
-  }
-
-  ImGui::EndChild();
-}
-
-FrontendResult ImGuiFrontend::CreateMainPage()
-{
-  // float selOffset = m_selectedGameIdx >= 5 ? 160.0f * (m_selectedGameIdx - 4) * -1.0f : 0;
-  float posX = 30 * m_frame_scale;
-  float posY = (345.0f / 2) * m_frame_scale;
-  auto extraFlags = m_games.size() < 5 ? ImGuiWindowFlags_None :
-                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav;
-
-  ImGui::SetNextWindowPos(ImVec2(posX, posY));
-  if (ImGui::Begin("Dolphin Emulator", nullptr,
-                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
-                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground |
-                       extraFlags))
-  {
-    auto game = CreateGameCarousel();
-    ImGui::End();
-    if (game != nullptr)
-    {
-      return FrontendResult(game);
-    }
-  }
-
-  const u64 current_time_us = Common::Timer::NowUs();
-  const u64 time_diff_us = current_time_us - m_imgui_last_frame_time;
-  const float time_diff_secs = static_cast<float>(time_diff_us / 1000000.0);
-  m_imgui_last_frame_time = current_time_us;
-
-  // Update I/O with window dimensions.
-  ImGuiIO& io = ImGui::GetIO();
-  io.DeltaTime = time_diff_secs;
-
-  return FrontendResult();  // keep running
-}
-
-FrontendResult ImGuiFrontend::CreateListPage()
-{
-  ImGui::SetNextWindowSize(ImVec2(540 * m_frame_scale, 425 * m_frame_scale));
-  ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2 - (540 / 2) * m_frame_scale,
-                                 ImGui::GetIO().DisplaySize.y / 2 - (425 / 2) * m_frame_scale));
-
-  if (ImGui::Begin("Dolphin Emulator", nullptr,
-                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
-                       ImGuiWindowFlags_NoSavedSettings))
-  {
-    auto game = CreateGameList();
-    ImGui::End();
-    if (game != nullptr)
-    {
-      return FrontendResult(game);
-    }
-  }
-
-  return FrontendResult();
-}
-
-std::shared_ptr<UICommon::GameFile> ImGuiFrontend::CreateGameList()
-{
-  if (ImGui::Button("Search Game"))
-  {
-    UWP::ShowKeyboard();
-    ImGui::SetKeyboardFocusHere();
-  }
-  ImGui::SameLine();
-
-  ImGui::PushItemWidth(-1);
-  ImGui::InputText("##gamesearch", m_list_search_buf, 32);
-  ImGui::PopItemWidth();
-
-  ImGui::Spacing();
-  ImGui::Separator();
-  ImGui::Spacing();
-
-  if (ImGui::BeginListBox("##Games List", ImVec2(-1, -1)))
-  {
-    size_t search = strlen(m_list_search_buf);
-    std::vector<std::shared_ptr<UICommon::GameFile>> games;
-    if (search > 0)
-    {
-      std::string search_phrase = std::string(m_list_search_buf);
-      if (search_phrase != m_prev_list_search)
-      {
-        m_list_search_results.clear();
-        for (auto& game : m_games)
-        {
-          auto& name = game->GetName(m_title_database);
-          auto it = std::search(name.begin(), name.end(), search_phrase.begin(),
-                                search_phrase.end(), [](unsigned char ch1, unsigned char ch2) {
-                                  return std::toupper(ch1) == std::toupper(ch2);
-                                });
-
-          if (it != name.end())
-          {
-            m_list_search_results.push_back(game);
-          }
-        }
-
-        m_prev_list_search = m_list_search_buf;
-      }
-
-      games = m_list_search_results;
-    }
-    else
-    {
-      games = m_games;
-    }
-
-    long timeSinceInit = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::high_resolution_clock::now() - m_time_since_init)
-                             .count();
-    for (auto& game : games)
-    {
-      if (ImGui::Selectable(
-              fmt::format("{}##{}", game->GetName(m_title_database).c_str(), game->GetFilePath())
-                  .c_str()) &&
-          timeSinceInit > 1500)
-      {
-        ImGui::EndListBox();
-        return game;
-      }
-    }
-
-    ImGui::EndListBox();
-  }
-
-  return nullptr;
-}
-
-std::shared_ptr<UICommon::GameFile> ImGuiFrontend::CreateGameCarousel()
-{
-  if (m_last_category != m_ccat)
-  {
-    m_last_category = m_ccat;
-    FilterGamesForCategory();
-
-    m_selectedGameIdx = 0;
-  }
-
-  long timeSinceInit = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::high_resolution_clock::now() - m_time_since_init)
-                           .count();
-
-  // Add a small delay to prevent accidental game starts during controller initialization
-  // This is a safety measure to avoid unintended game launches
-  if (ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown) && timeSinceInit > 1500)
-  {
-    if (m_displayed_games.size() != 0)
-    {
-      return m_displayed_games[m_selectedGameIdx];
-    }
-  }
-
-  // Display 5 games, 2 games to the left of the selection, 2 games to the right.
-  for (int i = m_selectedGameIdx - 2; i < m_selectedGameIdx + 3; i++)
-  {
-    int idx = i;
-    if (m_displayed_games.size() >= 4)
-    {
-      if (i < 0)
-      {
-        // wrap around, total games + -index
-        idx = static_cast<int>(m_displayed_games.size()) + i;
-      }
-      else if (i >= m_displayed_games.size())
-      {
-        // wrap around, i - total games
-        idx = i - static_cast<int>(m_displayed_games.size());
-      }
-    }
-    else
-    {
-      if (i < 0)
-      {
-        idx = static_cast<int>(m_displayed_games.size()) + i;
-      }
-      else if (i >= m_displayed_games.size())
-      {
-        continue;
-      }
-    }
-
-    if (idx < 0 || idx >= m_displayed_games.size())
-      continue;
-
-    ImVec4 border_col;
-    float selectedScale = 1.0f;
-    if (m_selectedGameIdx == idx)
-    {
-      border_col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-      // The background image doesn't fit 2 games very well when scaled up.
-      selectedScale = m_displayed_games.size() > 2 ? 1.15 : 1.0f;
-    }
-    else
-    {
-      border_col = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
-    }
-
-    AbstractTexture* handle = GetHandleForGame(m_displayed_games[idx]);
-    ImGui::SameLine();
-    ImGui::BeginChild(
-        m_displayed_games[idx]->GetFilePath().c_str(),
-        ImVec2((160 + 25) * m_frame_scale * selectedScale, 250 * m_frame_scale * selectedScale),
-        true,
-        ImGuiWindowFlags_NavFlattened | ImGuiWindowFlags_NoBackground |
-            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoTitleBar);
-
-    if (handle != 0)
-    {
-      ImGui::Image(
-          (ImTextureID)handle,
-          ImVec2(160.f * m_frame_scale * selectedScale, 224.f * m_frame_scale * selectedScale),
-          ImVec2(0, 0), ImVec2(1, 1), ImVec4(1.0f, 1.0f, 1.0f, 1.0f), border_col);
-      ImGui::Text(m_displayed_games[idx]->GetName(m_title_database).c_str());
-    }
-    else
-    {
-      ImGui::Text(m_displayed_games[idx]->GetName(m_title_database).c_str());
-    }
-
-    ImGui::EndChild();
-  }
-
-  return nullptr;
-}
-
-AbstractTexture* ImGuiFrontend::GetHandleForGame(std::shared_ptr<UICommon::GameFile> game)
-{
-  std::string game_id = game->GetGameID();
-  auto result = m_cover_textures.find(game_id);
-  if (m_cover_textures.find(game_id) == m_cover_textures.end())
-  {
-    std::shared_ptr<AbstractTexture> texture = CreateCoverTexture(game);
-    if (texture == nullptr)
-    {
-      AbstractTexture* missing = GetOrCreateMissingTex();
-      m_cover_textures.emplace(game_id, missing);
-      return missing;
-    }
-    else
-    {
-      auto pair = m_cover_textures.emplace(game_id, std::move(texture));
-      return pair.first->second.get();
-    }
-  }
-
-  return result->second.get();
-}
-
-std::shared_ptr<AbstractTexture> CreateTextureFromPath(std::string path, bool is_theme_asset)
-{
-  std::string file_data;
-  if (!File::ReadFileToString(path, file_data))
-    return {};
-
-  std::vector<unsigned char> buffer = {file_data.begin(), file_data.end()};
-  if (buffer.empty())
-    return {};
-
-  int width, height, channels;
-  unsigned char* image_data = stbi_load_from_memory(buffer.data(), static_cast<int>(buffer.size()),
-                                                    &width, &height, &channels, 4);
-  if (!image_data)
-    return {};
-
-  TextureConfig tex_config(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
-                           AbstractTextureType::Texture_2D);
-
-  std::string texture_name = is_theme_asset ? "theme:" + path : "cover:" + path;
-  std::shared_ptr<AbstractTexture> tex = g_gfx->CreateTexture(tex_config, texture_name);
-  if (!tex)
-  {
-    stbi_image_free(image_data);
-    PanicAlertFmt("Failed to create ImGui texture");
-    return {};
-  }
-
-  tex->Load(0, width, height, width, image_data, sizeof(u32) * width * height);
-  stbi_image_free(image_data);
-
-  return std::move(tex);
-}
-
-std::shared_ptr<AbstractTexture>
-ImGuiFrontend::CreateCoverTexture(std::shared_ptr<UICommon::GameFile> game)
-{
-  if (!File::Exists(File::GetUserPath(D_COVERCACHE_IDX) + game->GetGameTDBID() + ".png"))
-  {
-    game->DownloadDefaultCover();
-  }
-
-  return std::move(
-      CreateTextureFromPath(File::GetUserPath(D_COVERCACHE_IDX) + game->GetGameTDBID() + ".png"));
-}
-
-AbstractTexture* ImGuiFrontend::GetOrCreateMissingTex()
-{
-  if (m_missing_tex != nullptr)
-    return m_missing_tex.get();
-
-  auto missing_tex = CreateTextureFromPath("Assets/missing.png");
-  m_missing_tex = std::move(missing_tex);
-
-  return m_missing_tex.get();
-}
-
-void ImGuiFrontend::LoadGameList()
-{
-  m_paths.clear();
-  m_games.clear();
-  m_displayed_games.clear();
-  m_paths = Config::GetIsoPaths();
-  for (auto dir : m_paths)
-  {
-    RecurseFolderForGames(dir);
-  }
-#ifdef WINRT_XBOX
-  // Load from the default path
-  auto localCachePath = winrt::to_string(
-      winrt::Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path());
-  RecurseFolderForGames(localCachePath);
-#endif
-  FilterGamesForCategory();
-  if (m_selectedGameIdx >= m_displayed_games.size() || m_selectedGameIdx < 0)
-    m_selectedGameIdx = 0;
-}
-
-void ImGuiFrontend::FilterGamesForCategory()
-{
-  m_displayed_games.clear();
-
-  switch (m_ccat)
-  {
-  case CAll:
-    m_displayed_games.insert(m_displayed_games.begin(), m_games.begin(), m_games.end());
-    break;
-  case CWii:
-    for (auto& game : m_games)
-    {
-      if (game->GetPlatform() != DiscIO::Platform::WiiDisc)
-        continue;
-
-      m_displayed_games.push_back(game);
-    }
-    break;
-  case CGC:
-    for (auto& game : m_games)
-    {
-      if (game->GetPlatform() != DiscIO::Platform::GameCubeDisc)
-        continue;
-
-      m_displayed_games.push_back(game);
-    }
-    break;
-  case COther:
-    for (auto& game : m_games)
-    {
-      if (game->GetPlatform() == DiscIO::Platform::WiiDisc ||
-          game->GetPlatform() == DiscIO::Platform::GameCubeDisc)
-        continue;
-
-      m_displayed_games.push_back(game);
-    }
-    break;
-  }
-}
-
-void ImGuiFrontend::LoadThemes()
-{
-  std::string selected_theme = Config::Get(Config::FRONTEND_SELECTED_THEME);
-
-  m_themes.clear();
-  m_selected_theme = nullptr;
-
-  RecurseForThemes("Sys/FrontendThemes/");
-  RecurseForThemes(File::GetUserPath(D_THEMES_IDX));
-
-  if (!m_selected_theme)
-  {
-    m_selected_theme = &m_themes["Flipper 2.2 - Beached"];
-  }
-}
-
-void ImGuiFrontend::RecurseForThemes(std::string path)
-{
-  std::string selected_theme = Config::Get(Config::FRONTEND_SELECTED_THEME);
-
-  for (auto folder : std::filesystem::directory_iterator(path))
-  {
-    if (!folder.is_directory())
-    {
-      continue;
-    }
-
-    FrontendTheme theme{};
-    if (theme.TryLoad(folder.path().string()))
-    {
-      m_themes.emplace(theme.GetName(), theme);
-
-      if (theme.GetName() == selected_theme)
-      {
-        m_selected_theme = &m_themes[theme.GetName()];
-      }
-    }
-  }
-}
-
-void ImGuiFrontend::RecurseFolderForGames(std::string path)
-{
-  try
-  {
-    for (auto file : std::filesystem::directory_iterator(path))
-    {
-      if (file.is_directory())
-      {
-        RecurseFolderForGames(file.path().string());
-        continue;
-      }
-
-      if (!file.is_regular_file())
-        continue;
-
-      std::filesystem::path normalised =
-          std::filesystem::path(file.path().string()).make_preferred();
-      std::string game_path = normalised.string();
-      std::replace(game_path.begin(), game_path.end(), '\\', '/');
-      auto game = new UICommon::GameFile(game_path);
-
-      if (game && game->IsValid())
-        m_games.emplace_back(std::move(game));
-    }
-  }
-  catch (std::exception)
-  {
-    // This folder can't be opened.
-  }
-}
-
-void ImGuiFrontend::AddGameFolder(std::string path)
-{
-  m_paths.push_back(path);
-  Config::SetIsoPaths(m_paths);
-}
-
-bool ImGuiFrontend::TryInput(std::string expression, std::shared_ptr<ciface::Core::Device> device)
-{
-  auto* input = device->FindInput(expression);
-  if (input == nullptr)
-    return false;
-
-  return input->GetState() > 0.5f;
-}
-
-void DrawSettingsMenu(UIState* state, float frame_scale)
-{
-  if (ImGui::BeginListBox("##tabs", ImVec2(100 * frame_scale, -1)))
-  {
-    if (ImGui::Selectable("General", state->selectedTab == General))
-    {
-      state->selectedTab = General;
-    }
-    if (ImGui::Selectable("Interface", state->selectedTab == Interface))
-    {
-      state->selectedTab = Interface;
-    }
-    if (ImGui::Selectable("Graphics", state->selectedTab == Graphics))
-    {
-      state->selectedTab = Graphics;
-    }
-    if (ImGui::Selectable("Audio", state->selectedTab == Audio))
-    {
-      state->selectedTab = Audio;
-    }
-    if (ImGui::Selectable("Controls", state->selectedTab == Controls))
-    {
-      state->selectedTab = Controls;
-    }
-    if (ImGui::Selectable("GameCube", state->selectedTab == GC))
-    {
-      state->selectedTab = GC;
-    }
-    if (ImGui::Selectable("Wii", state->selectedTab == Wii))
-    {
-      state->selectedTab = Wii;
-    }
-    if (ImGui::Selectable("Advanced", state->selectedTab == Advanced))
-    {
-      state->selectedTab = Advanced;
-    }
-    if (ImGui::Selectable("Paths", state->selectedTab == Paths))
-    {
-      state->selectedTab = Paths;
-    }
-    if (ImGui::Selectable("Achievements", state->selectedTab == Achievements))
-    {
-      state->selectedTab = Achievements;
-    }
-    if (ImGui::Selectable("About", state->selectedTab == About))
-    {
-      state->selectedTab = About;
-    }
-
-    ImGui::EndListBox();
-  }
-
-  ImGui::SameLine();
-  if (ImGui::BeginChild("##tabview", ImVec2(-1, -1), true))
-  {
-    switch (state->selectedTab)
-    {
-    case General:
-      CreateGeneralTab(state);
-      break;
-    case Interface:
-      CreateInterfaceTab(state);
-      break;
-    case Graphics:
-      CreateGraphicsTab(state);
-      break;
-    case Audio:
-      CreateAudioTab(state);
-      break;
-    case Controls:
-      CreateControlsTab(state);
-      break;
-    case GC:
-      CreateGameCubeTab(state);
-      break;
-    case Wii:
-      CreateWiiTab(state);
-      break;
-    case Paths:
-      CreatePathsTab(state);
-      break;
-    case Advanced:
-      CreateAdvancedTab(state);
-      break;
-    case Achievements:
-      CreateAchievementsTab(state);
-      break;
-    case About:
-      ImGui::TextWrapped(
-          "Dolphin Emulator on UWP - Version 1.1.9.1 Beta (Based on Dolphin 2506-218)\n\n"
-          "This is a fork of Dolphin Emulator introducing Xbox support with a big picture "
-          "frontend\n\n"
-          "Credits:\n\n"
-          "Dolphin: for their amazing work on Dolphin Emulator\n"
-          "SirMangler: for their amazing work on porting Dolphin for UWP\n"
-          "worleydl: For his oct2024-rebase branch (it helped so much)\n"
-          "SirManglers Ko-Fi: https://ko-fi.com/sirmangler\n"
-          "Sterns Ko-Fi: https://ko-fi.com/stern\n\n"
-          "Dolphin Emulator is licensed under GPLv2+ and is not associated with Nintendo.");
-      break;
-    }
-
-    ImGui::EndChild();
-  }
-}
-
-std::shared_ptr<AbstractTexture> FrontendTheme::GetBackground(ThemeBG cat)
-{
-  return m_textures[cat];
-}
-
-bool FrontendTheme::TryLoad(std::string path)
-{
-  const auto SetThemeOrBackup = [=](ThemeBG target, ThemeBG backup, std::string basePath) {
-    // Try both PNG and JPEG/JPG formats
-    std::string pngPath = basePath + ".png";
-    std::string jpgPath = basePath + ".jpg";
-    std::string jpegPath = basePath + ".jpeg";
-
-    if (File::Exists(pngPath))
-    {
-      auto bg = CreateTextureFromPath(pngPath, true);
-      m_textures[target] = std::move(bg);
-    }
-    else if (File::Exists(jpgPath))
-    {
-      auto bg = CreateTextureFromPath(jpgPath, true);
-      m_textures[target] = std::move(bg);
-    }
-    else if (File::Exists(jpegPath))
-    {
-      auto bg = CreateTextureFromPath(jpegPath, true);
-      m_textures[target] = std::move(bg);
-    }
-
-    if (!m_textures[target])
-    {
-      if (m_textures[backup])
-      {
-        m_textures[target] = m_textures[backup];
-      }
-    }
-  };
-
-  // Check for required files in both PNG and JPEG formats
-  bool hasCarouselBg = File::Exists(path + "\\carousel_background_all.png") ||
-                       File::Exists(path + "\\carousel_background_all.jpg") ||
-                       File::Exists(path + "\\carousel_background_all.jpeg");
-
-  bool hasMenuBg = File::Exists(path + "\\menu_background.png") ||
-                   File::Exists(path + "\\menu_background.jpg") ||
-                   File::Exists(path + "\\menu_background.jpeg");
-
-  bool hasListUi = File::Exists(path + "\\list_ui.png") || File::Exists(path + "\\list_ui.jpg") ||
-                   File::Exists(path + "\\list_ui.jpeg");
-
-  bool hasCarouselUi = File::Exists(path + "\\carousel_ui.png") ||
-                       File::Exists(path + "\\carousel_ui.jpg") ||
-                       File::Exists(path + "\\carousel_ui.jpeg");
-
-  if (!hasCarouselBg || !hasMenuBg || !hasListUi || !hasCarouselUi)
-  {
-    return false;
-  }
-
-  // Try loading carousel background in either format
-  std::shared_ptr<AbstractTexture> all_bg;
-  if (File::Exists(path + "\\carousel_background_all.png"))
-    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.png", true);
-  else if (File::Exists(path + "\\carousel_background_all.jpg"))
-    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.jpg", true);
-  else if (File::Exists(path + "\\carousel_background_all.jpeg"))
-    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.jpeg", true);
-
-  if (!all_bg)
-    return false;
-
-  m_textures[ThemeBG::BG_All] = all_bg;
-
-  // Try loading menu background in either format
-  std::shared_ptr<AbstractTexture> menu_bg;
-  if (File::Exists(path + "\\menu_background.png"))
-    menu_bg = CreateTextureFromPath(path + "\\menu_background.png", true);
-  else if (File::Exists(path + "\\menu_background.jpg"))
-    menu_bg = CreateTextureFromPath(path + "\\menu_background.jpg", true);
-  else if (File::Exists(path + "\\menu_background.jpeg"))
-    menu_bg = CreateTextureFromPath(path + "\\menu_background.jpeg", true);
-
-  if (!menu_bg)
-    return false;
-
-  m_textures[ThemeBG::BG_Menu] = menu_bg;
-
-  // Try loading list UI in either format
-  std::shared_ptr<AbstractTexture> list_ui_bg;
-  if (File::Exists(path + "\\list_ui.png"))
-    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.png", true);
-  else if (File::Exists(path + "\\list_ui.jpg"))
-    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.jpg", true);
-  else if (File::Exists(path + "\\list_ui.jpeg"))
-    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.jpeg", true);
-
-  if (!list_ui_bg)
-    return false;
-
-  m_textures[ThemeBG::BG_List_UI] = list_ui_bg;
-
-  // Try loading carousel UI in either format
-  std::shared_ptr<AbstractTexture> carousel_ui_bg;
-  if (File::Exists(path + "\\carousel_ui.png"))
-    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.png", true);
-  else if (File::Exists(path + "\\carousel_ui.jpg"))
-    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.jpg", true);
-  else if (File::Exists(path + "\\carousel_ui.jpeg"))
-    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.jpeg", true);
-
-  if (!carousel_ui_bg)
-    return false;
-
-  m_textures[ThemeBG::BG_Carousel_UI] = carousel_ui_bg;
-
-  // Load optional theme elements with fallbacks
-  SetThemeOrBackup(BG_Wii, BG_All, path + "\\carousel_background_wii");
-  SetThemeOrBackup(BG_GC, BG_All, path + "\\carousel_background_gamecube");
-  SetThemeOrBackup(BG_Other, BG_All, path + "\\carousel_background_other");
-  SetThemeOrBackup(BG_List, BG_Menu, path + "\\menu_background_list");
-  SetThemeOrBackup(BG_Netplay, BG_Menu, path + "\\menu_background_netplay");
-
-  m_name = std::filesystem::path(path).filename().string();
-
-  return true;
-}
-
-void CreateAudioTab(UIState* state)
-{
-  if (ImGui::CollapsingHeader("DSP Options"))
-  {
-    const char* dsp_items[] = {"HLE", "LLE Recompiler", "LLE Interpreter"};
-    int dsp_idx =
-        Config::Get(Config::MAIN_DSP_HLE) ? 0 : (Config::Get(Config::MAIN_DSP_JIT) ? 1 : 2);
-    if (ImGui::Combo("DSP Emulation Engine", &dsp_idx, dsp_items, IM_ARRAYSIZE(dsp_items)))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_DSP_HLE, dsp_idx == 0);
-      Config::SetBaseOrCurrent(Config::MAIN_DSP_JIT, dsp_idx == 1);
-      Config::Save();
-    }
-    ImGui::TextWrapped("Selects how the Digital Signal Processor (DSP) is emulated. Determines how "
-                       "the audio is processed and what system features are available.");
-  }
-
-  if (ImGui::CollapsingHeader("Volume"))
-  {
-    int volume = Config::Get(Config::MAIN_AUDIO_MUTED) ? 0 : Config::Get(Config::MAIN_AUDIO_VOLUME);
-    if (ImGui::SliderInt("Volume", &volume, 0, 100))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, volume == 0);
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME, volume);
-      Config::Save();
-      AudioCommon::UpdateSoundStream(Core::System::GetInstance());
-    }
-  }
-
-  if (ImGui::CollapsingHeader("Backend Settings"))
-  {
-    std::vector<std::string> backends = AudioCommon::GetSoundBackends();
-    std::string current_backend = Config::Get(Config::MAIN_AUDIO_BACKEND);
-    int backend_idx = 0;
-    for (size_t i = 0; i < backends.size(); ++i)
-    {
-      if (backends[i] == current_backend)
-      {
-        backend_idx = static_cast<int>(i);
-        break;
-      }
-    }
-
-    if (ImGui::Combo(
-            "Audio Backend", &backend_idx,
-            [](void* data, int idx, const char** out_text) {
-              auto* backends = static_cast<std::vector<std::string>*>(data);
-              *out_text = backends->at(idx).c_str();
-              return true;
-            },
-            &backends, static_cast<int>(backends.size())))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BACKEND, backends[backend_idx]);
-      Config::Save();
-    }
-
-#ifdef _WIN32
-    if (backends[backend_idx] == BACKEND_WASAPI)
-    {
-      std::vector<std::string> devices = WASAPIStream::GetAvailableDevices();
-      std::string current_device = Config::Get(Config::MAIN_WASAPI_DEVICE);
-      int device_idx = 0;
-      for (size_t i = 0; i < devices.size(); ++i)
-      {
-        if (devices[i] == current_device)
-        {
-          device_idx = static_cast<int>(i);
-          break;
-        }
-      }
-
-      if (ImGui::Combo(
-              "Output Device", &device_idx,
-              [](void* data, int idx, const char** out_text) {
-                auto* devices = static_cast<std::vector<std::string>*>(data);
-                *out_text = devices->at(idx).c_str();
-                return true;
-              },
-              &devices, static_cast<int>(devices.size())))
-      {
-        Config::SetBaseOrCurrent(Config::MAIN_WASAPI_DEVICE, devices[device_idx]);
-        Config::Save();
-      }
-    }
-#endif
-
-    if (AudioCommon::SupportsLatencyControl(backends[backend_idx]))
-    {
-      int latency = Config::Get(Config::MAIN_AUDIO_LATENCY);
-      if (ImGui::SliderInt("Latency", &latency, 0, 200))
-      {
-        Config::SetBaseOrCurrent(Config::MAIN_AUDIO_LATENCY, latency);
-        Config::Save();
-      }
-      ImGui::TextWrapped(
-          "Sets the audio latency in milliseconds. Higher values may reduce audio crackling.");
-    }
-  }
-#ifndef WINRT_XBOX  // TODO: Can't figure out how this one works will look into more if it's
-                    // requested or is required
-  if (ImGui::CollapsingHeader("Dolby Pro Logic II"))
-  {
-    bool dpl2 = Config::Get(Config::MAIN_DPL2_DECODER);
-    if (ImGui::Checkbox("Enable Dolby Pro Logic II", &dpl2))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_DPL2_DECODER, dpl2);
-      Config::Save();
-    }
-    ImGui::TextWrapped(
-        "Enables Dolby Pro Logic II emulation using 5.1 surround. Certain backends only.");
-    if (dpl2)
-    {
-      const char* quality_items[] = {"Lowest (Latency ~10 ms)", "Low (Latency ~20 ms)",
-                                     "High (Latency ~40 ms)", "Highest (Latency ~80 ms)"};
-      int quality_idx = static_cast<int>(Config::Get(Config::MAIN_DPL2_QUALITY));
-      if (ImGui::Combo("Decoding Quality", &quality_idx, quality_items,
-                       IM_ARRAYSIZE(quality_items)))
-      {
-        Config::SetBaseOrCurrent(Config::MAIN_DPL2_QUALITY,
-                                 static_cast<AudioCommon::DPL2Quality>(quality_idx));
-        Config::Save();
-      }
-      ImGui::TextWrapped("Adjusts the quality setting of the Dolby Pro Logic II decoder. Higher "
-                         "presets increases audio latency.");
-    }
-  }
-#endif
-
-  if (ImGui::CollapsingHeader("Audio Playback Settings"))
-  {
-    int buffer_size = Config::Get(Config::MAIN_AUDIO_BUFFER_SIZE);
-    if (ImGui::SliderInt("Audio Buffer Size", &buffer_size, 5, 100))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BUFFER_SIZE, buffer_size);
-      Config::Save();
-    }
-    ImGui::TextWrapped("Sets the size of the audio buffer in milliseconds. Higher values may "
-                       "reduce audio crackling.");
-
-    bool fill_gaps = Config::Get(Config::MAIN_AUDIO_FILL_GAPS);
-    if (ImGui::Checkbox("Fill Gaps", &fill_gaps))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_FILL_GAPS, fill_gaps);
-      Config::Save();
-    }
-    ImGui::TextWrapped("Fills gaps in audio playback to prevent audio crackling.");
-
-    bool mute_on_speed_limit = Config::Get(Config::MAIN_AUDIO_MUTE_ON_DISABLED_SPEED_LIMIT);
-    if (ImGui::Checkbox("Mute on Speed Limit", &mute_on_speed_limit))
-    {
-      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTE_ON_DISABLED_SPEED_LIMIT,
-                               mute_on_speed_limit);
-      Config::Save();
-    }
-    ImGui::TextWrapped("Mutes audio when emulation speed is above 100%.");
-  }
-}
 void CreateAchievementsTab(UIState* state)
 {
   // Use CPUThreadGuard to safely access config when dual core is enabled
@@ -4396,5 +4247,2917 @@ void DrawAchievementsWindow(UIState* state)
   ImGui::End();
 #endif
 }
+
+void CreateGCPort(int index, std::vector<std::string> devices)
+{
+  if (ImGui::BeginChild(fmt::format("gc-port-{}", index).c_str(), ImVec2(-1, 75 * m_frame_scale),
+                        true))
+  {
+    auto controller = Pad::GetConfig()->GetController(index);
+    auto default_device = controller->GetDefaultDevice().name;
+
+    ImGui::Text("GameCube Port %d", index + 1);
+
+    if (ImGui::BeginCombo("Device", default_device.c_str()))
+    {
+      for (auto device : devices)
+      {
+        if (ImGui::Selectable(device.c_str(), strcmp(default_device.c_str(), device.c_str()) == 0))
+        {
+          controller->SetDefaultDevice(device);
+          controller->UpdateReferences(g_controller_interface);
+          Pad::GetConfig()->SaveConfig();
+        }
+      }
+
+      ImGui::EndCombo();
+    }
+
+    if (ImGui::BeginCombo("Profile", m_selected_gc_profile[index].c_str()))
+    {
+      for (auto profile : m_gc_profiles)
+      {
+        if (ImGui::Selectable(profile.c_str(), m_selected_gc_profile[index] == profile))
+        {
+          m_selected_gc_profile[index] = profile;
+
+          if (m_selected_gc_profile[index] == "None")
+          {
+            // Loading an empty inifile section clears everything.
+            Common::IniFile::Section sec;
+
+            controller->LoadConfig(&sec);
+            controller->SetDefaultDevice(default_device);
+            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
+                                     SerialInterface::SIDevices::SIDEVICE_NONE);
+          }
+          else if (m_selected_gc_profile[index] == "Default")
+          {
+            controller->LoadDefaults(g_controller_interface);
+            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
+                                     SerialInterface::SIDevices::SIDEVICE_GC_CONTROLLER);
+          }
+          else
+          {
+            Common::IniFile ini;
+            ini.Load(File::GetUserPath(D_CONFIG_IDX) + PROFILES_DIR +
+                     Pad::GetConfig()->GetProfileDirectoryName() + "/" + profile + ".ini");
+
+            controller->LoadConfig(ini.GetOrCreateSection("Profile"));
+            Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(index),
+                                     SerialInterface::SIDevices::SIDEVICE_GC_CONTROLLER);
+          }
+
+          controller->UpdateReferences(g_controller_interface);
+          Pad::GetConfig()->SaveConfig();
+          Config::Save();
+        }
+      }
+
+      ImGui::EndCombo();
+    }
+  }
+
+  ImGui::EndChild();
+}
+
+FrontendResult ImGuiFrontend::CreateMainPage()
+{
+  // float selOffset = m_selectedGameIdx >= 5 ? 160.0f * (m_selectedGameIdx - 4) * -1.0f : 0;
+  float posX = 30 * m_frame_scale;
+  float posY = (345.0f / 2) * m_frame_scale;
+  auto extraFlags = m_games.size() < 5 ? ImGuiWindowFlags_None :
+                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav;
+
+  ImGui::SetNextWindowPos(ImVec2(posX, posY));
+  if (ImGui::Begin("Dolphin Emulator", nullptr,
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+                       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground |
+                       extraFlags))
+  {
+    auto game = CreateGameCarousel();
+    ImGui::End();
+    if (game != nullptr)
+    {
+      return FrontendResult(game);
+    }
+  }
+
+  const u64 current_time_us = Common::Timer::NowUs();
+  const u64 time_diff_us = current_time_us - m_imgui_last_frame_time;
+  const float time_diff_secs = static_cast<float>(time_diff_us / 1000000.0);
+  m_imgui_last_frame_time = current_time_us;
+
+  // Update I/O with window dimensions.
+  ImGuiIO& io = ImGui::GetIO();
+  io.DeltaTime = time_diff_secs;
+
+  return FrontendResult();  // keep running
+}
+
+FrontendResult ImGuiFrontend::CreateListPage()
+{
+  ImGui::SetNextWindowSize(ImVec2(540 * m_frame_scale, 425 * m_frame_scale));
+  ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2 - (540 / 2) * m_frame_scale,
+                                 ImGui::GetIO().DisplaySize.y / 2 - (425 / 2) * m_frame_scale));
+
+  if (ImGui::Begin("Dolphin Emulator", nullptr,
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoSavedSettings))
+  {
+    auto game = CreateGameList();
+    ImGui::End();
+    if (game != nullptr)
+    {
+      return FrontendResult(game);
+    }
+  }
+
+  return FrontendResult();
+}
+
+std::shared_ptr<UICommon::GameFile> ImGuiFrontend::CreateGameList()
+{
+  if (ImGui::Button("Search Game"))
+  {
+    UWP::ShowKeyboard();
+    ImGui::SetKeyboardFocusHere();
+  }
+  ImGui::SameLine();
+
+  ImGui::PushItemWidth(-1);
+  ImGui::InputText("##gamesearch", m_list_search_buf, 32);
+  ImGui::PopItemWidth();
+
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::Spacing();
+
+  if (ImGui::BeginListBox("##Games List", ImVec2(-1, -1)))
+  {
+    size_t search = strlen(m_list_search_buf);
+    std::vector<std::shared_ptr<UICommon::GameFile>> games;
+    if (search > 0)
+    {
+      std::string search_phrase = std::string(m_list_search_buf);
+      if (search_phrase != m_prev_list_search)
+      {
+        m_list_search_results.clear();
+        for (auto& game : m_games)
+        {
+          auto& name = game->GetName(m_title_database);
+          auto it = std::search(name.begin(), name.end(), search_phrase.begin(),
+                                search_phrase.end(), [](unsigned char ch1, unsigned char ch2) {
+                                  return std::toupper(ch1) == std::toupper(ch2);
+                                });
+
+          if (it != name.end())
+          {
+            m_list_search_results.push_back(game);
+          }
+        }
+
+        m_prev_list_search = m_list_search_buf;
+      }
+
+      games = m_list_search_results;
+    }
+    else
+    {
+      games = m_games;
+    }
+
+    long timeSinceInit = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::high_resolution_clock::now() - m_time_since_init)
+                             .count();
+    for (auto& game : games)
+    {
+      if (ImGui::Selectable(
+              fmt::format("{}##{}", game->GetName(m_title_database).c_str(), game->GetFilePath())
+                  .c_str()) &&
+          timeSinceInit > 1500)
+      {
+        ImGui::EndListBox();
+        return game;
+      }
+    }
+
+    ImGui::EndListBox();
+  }
+
+  return nullptr;
+}
+
+std::shared_ptr<UICommon::GameFile> ImGuiFrontend::CreateGameCarousel()
+{
+  if (m_last_category != m_ccat)
+  {
+    m_last_category = m_ccat;
+    FilterGamesForCategory();
+    m_selectedGameIdx = 0;
+    m_target_scroll_offset = 0.0f;
+    m_carousel_scroll_offset = 0.0f;
+  }
+
+  if (m_displayed_games.empty())
+    return nullptr;
+
+  // Calculate delta time for smooth animations
+  static auto last_time = std::chrono::high_resolution_clock::now();
+  auto current_time = std::chrono::high_resolution_clock::now();
+  float delta_time = std::chrono::duration<float>(current_time - last_time).count();
+  last_time = current_time;
+
+  // Update animations
+  UpdateCarouselAnimation(delta_time);
+
+  long timeSinceInit = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::high_resolution_clock::now() - m_time_since_init)
+                           .count();
+
+  // Handle game selection (with safety delay)
+  if (ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown) && timeSinceInit > 1500)
+  {
+    return m_displayed_games[m_selectedGameIdx];
+  }
+
+  // Draw enhanced carousel background
+  DrawCarouselBackground();
+
+  // Calculate base position for carousel
+  ImVec2 screen_size = ImGui::GetIO().DisplaySize;
+  float base_x = screen_size.x * 0.5f;
+  float base_y = screen_size.y * 0.45f; // Move down slightly to avoid top clipping
+
+  // Ensure we stay within bounds
+  if (m_selectedGameIdx < 0) m_selectedGameIdx = 0;
+  if (m_selectedGameIdx >= static_cast<int>(m_displayed_games.size()))
+    m_selectedGameIdx = static_cast<int>(m_displayed_games.size()) - 1;
+
+  // Calculate how many items to show on each side (allow 5 total: 2 + center + 2)
+  int half_visible = 2; // Show 2 on each side for 5 total games
+  int start_index = m_selectedGameIdx - half_visible;
+  int end_index = m_selectedGameIdx + half_visible + 1;
+
+  // Draw carousel items with enhanced visuals
+  for (int i = start_index; i < end_index; i++)
+  {
+    int wrapped_index = i;
+    
+    // Handle wrapping for circular carousel
+    if (m_displayed_games.size() > m_carousel_visible_items)
+    {
+      while (wrapped_index < 0)
+        wrapped_index += static_cast<int>(m_displayed_games.size());
+      while (wrapped_index >= static_cast<int>(m_displayed_games.size()))
+        wrapped_index -= static_cast<int>(m_displayed_games.size());
+    }
+    else
+    {
+      // For smaller collections, don't wrap and skip invalid indices
+      if (wrapped_index < 0 || wrapped_index >= static_cast<int>(m_displayed_games.size()))
+        continue;
+    }
+
+    DrawCarouselItem(m_displayed_games[wrapped_index], i, m_selectedGameIdx, base_x, base_y);
+  }
+
+  // Draw game information panel for selected game
+  if (m_show_game_info && m_selectedGameIdx < static_cast<int>(m_displayed_games.size()))
+  {
+    DrawGameInfo(m_displayed_games[m_selectedGameIdx]);
+  }
+
+  return nullptr;
+}
+
+void ImGuiFrontend::UpdateCarouselAnimation(float delta_time)
+{
+  if (!m_carousel_smooth_scrolling)
+  {
+    m_carousel_scroll_offset = m_target_scroll_offset;
+    return;
+  }
+
+  // Smooth interpolation towards target
+  float difference = m_target_scroll_offset - m_carousel_scroll_offset;
+  if (std::abs(difference) > 0.01f)
+  {
+    m_carousel_scroll_offset += difference * m_carousel_animation_speed * delta_time;
+  }
+  else
+  {
+    m_carousel_scroll_offset = m_target_scroll_offset;
+  }
+
+  // Update game info fade with 3-second delay
+  m_game_selection_timer += delta_time;
+  
+  if (m_game_selection_timer >= 3.0f)
+  {
+    // Start fading in after 3 seconds
+    m_game_info_fade_alpha = std::min(1.0f, m_game_info_fade_alpha + delta_time * 3.0f);
+  }
+  else
+  {
+    // Keep game info hidden for the first 3 seconds
+    m_game_info_fade_alpha = 0.0f;
+  }
+}
+
+void ImGuiFrontend::DrawCarouselBackground()
+{
+  // Optional subtle background for carousel (no-op for now)
+}
+
+float ImGuiFrontend::GetCarouselItemPosition(int index, int center_index)
+{
+  const float delta = static_cast<float>(index - center_index);
+  return delta * m_carousel_item_spacing;
+}
+
+float ImGuiFrontend::GetCarouselItemScale(int index, int center_index)
+{
+  const float distance = std::abs(static_cast<float>(index - center_index));
+  const float t = std::max(0.0f, 1.0f - 0.15f * distance);
+  return m_carousel_unselected_scale +
+         (m_carousel_selected_scale - m_carousel_unselected_scale) * t;
+}
+
+float ImGuiFrontend::GetCarouselItemAlpha(int index, int center_index)
+{
+  const float distance = std::abs(static_cast<float>(index - center_index));
+  const float alpha = 1.0f - (0.15f * distance);
+  return std::max(alpha, 0.4f);
+}
+
+void ImGuiFrontend::DrawCarouselItem(std::shared_ptr<UICommon::GameFile> game, int index, int center_index, float base_x, float base_y)
+{
+  if (!game) return;
+
+  float position_offset = GetCarouselItemPosition(index, center_index);
+  float scale = GetCarouselItemScale(index, center_index);
+  float alpha = GetCarouselItemAlpha(index, center_index);
+
+  // Calculate item position
+  float item_x = base_x + position_offset + m_carousel_scroll_offset;
+  float item_y = base_y;
+
+  // Base cover dimensions
+  float cover_width = 160.0f * m_frame_scale * scale;
+  float cover_height = 224.0f * m_frame_scale * scale;
+
+  // Check if item would be visible on screen (only skip if completely off-screen with margin)
+  ImVec2 screen_size = ImGui::GetIO().DisplaySize;
+  float item_left = item_x - cover_width * 0.5f;
+  float item_right = item_x + cover_width * 0.5f;
+  
+  // More generous culling - only skip if completely off-screen with extra margin
+  if (item_right < -100.0f || item_left > screen_size.x + 100.0f)
+    return; // Skip items that are completely off-screen
+
+  // Position the item
+  ImGui::SetCursorScreenPos(ImVec2(item_x - cover_width * 0.5f, item_y - cover_height * 0.5f));
+
+  // Create unique ID for this item
+  ImGui::PushID(game->GetFilePath().c_str());
+
+  // Draw shadow if enabled
+  if (m_carousel_show_shadows && index == center_index)
+  {
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    ImVec2 shadow_min = ImVec2(item_x - cover_width * 0.5f + m_carousel_shadow_offset, 
+                               item_y - cover_height * 0.5f + m_carousel_shadow_offset);
+    ImVec2 shadow_max = ImVec2(shadow_min.x + cover_width, shadow_min.y + cover_height);
+    
+    // Apply screen clipping to shadow
+    shadow_min.x = std::max(shadow_min.x, 0.0f);
+    shadow_min.y = std::max(shadow_min.y, 0.0f);
+    shadow_max.x = std::min(shadow_max.x, screen_size.x);
+    shadow_max.y = std::min(shadow_max.y, screen_size.y);
+    
+    if (shadow_min.x < shadow_max.x && shadow_min.y < shadow_max.y)
+    {
+      draw_list->AddRectFilled(shadow_min, shadow_max, IM_COL32(0, 0, 0, 100), 10.0f);
+    }
+  }
+
+  // Get cover texture
+  AbstractTexture* handle = GetHandleForGame(game);
+  
+  if (handle)
+  {
+    // Main cover image without clipping - let ImGui handle natural boundaries
+    ImVec4 tint_color = ImVec4(1.0f, 1.0f, 1.0f, alpha);
+    ImVec4 border_color = (index == center_index) ? 
+                          ImVec4(1.0f, 1.0f, 1.0f, alpha) : 
+                          ImVec4(0.5f, 0.5f, 0.5f, alpha * 0.5f);
+
+    ImGui::Image((ImTextureID)handle,
+                 ImVec2(cover_width, cover_height),
+                 ImVec2(0, 0), ImVec2(1, 1),
+                 tint_color, border_color);
+
+    // Draw reflection if enabled and this is the center item
+    if (m_carousel_show_reflections && index == center_index)
+    {
+      ImDrawList* draw_list = ImGui::GetWindowDrawList();
+      
+      // Reflection position (below the main image)
+      float reflection_y = item_y + cover_height * 0.5f + 10.0f;
+      float reflection_height = cover_height * 0.6f; // Shorter reflection
+      
+      ImVec2 reflection_min = ImVec2(item_x - cover_width * 0.5f, reflection_y);
+      ImVec2 reflection_max = ImVec2(reflection_min.x + cover_width, reflection_min.y + reflection_height);
+      
+      // Create reflection color with proper alpha
+      ImU32 reflection_color = IM_COL32(255, 255, 255, static_cast<int>(m_carousel_reflection_alpha * alpha * 255));
+      
+      // Use the same texture but flipped for reflection
+      draw_list->AddImage((ImTextureID)handle, reflection_min, reflection_max,
+                         ImVec2(0, 1), ImVec2(1, 0), reflection_color);
+      
+      // Add gradient overlay to fade the reflection
+      draw_list->AddRectFilledMultiColor(reflection_min, reflection_max,
+                                        IM_COL32(0, 0, 0, static_cast<int>((1.0f - m_carousel_reflection_alpha) * 255)),
+                                        IM_COL32(0, 0, 0, static_cast<int>((1.0f - m_carousel_reflection_alpha) * 255)),
+                                        IM_COL32(0, 0, 0, 255),
+                                        IM_COL32(0, 0, 0, 255));
+    }
+
+    // Draw game title below cover (only for center item or when zoomed in)
+    if (index == center_index || scale > 0.9f)
+    {
+      std::string game_name = game->GetName(m_title_database);
+      ImVec2 text_size = ImGui::CalcTextSize(game_name.c_str());
+      float text_x = item_x - text_size.x * 0.5f;
+      float text_y = item_y + cover_height * 0.5f + (m_carousel_show_reflections ? 80.0f : 20.0f);
+      
+      ImGui::SetCursorScreenPos(ImVec2(text_x, text_y));
+      ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, alpha), "%s", game_name.c_str());
+    }
+  }
+  else
+  {
+    // Fallback for missing covers
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    ImVec2 rect_min = ImVec2(item_x - cover_width * 0.5f, item_y - cover_height * 0.5f);
+    ImVec2 rect_max = ImVec2(rect_min.x + cover_width, rect_min.y + cover_height);
+    
+    draw_list->AddRectFilled(rect_min, rect_max, IM_COL32(50, 50, 50, static_cast<int>(alpha * 255)), 5.0f);
+    draw_list->AddRect(rect_min, rect_max, IM_COL32(100, 100, 100, static_cast<int>(alpha * 255)), 5.0f, 0, 2.0f);
+    
+    // Draw game name in the center of the rectangle
+    std::string game_name = game->GetName(m_title_database);
+    ImVec2 text_size = ImGui::CalcTextSize(game_name.c_str());
+    ImVec2 text_pos = ImVec2(item_x - text_size.x * 0.5f, item_y - text_size.y * 0.5f);
+    
+    ImGui::SetCursorScreenPos(text_pos);
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, alpha), "%s", game_name.c_str());
+  }
+
+  ImGui::PopID();
+}
+
+void ImGuiFrontend::DrawGameInfo(std::shared_ptr<UICommon::GameFile> game)
+{
+  if (!game) return;
+
+  ImVec2 screen_size = ImGui::GetIO().DisplaySize;
+  float panel_width = 400.0f * m_frame_scale;
+  float panel_height = 300.0f * m_frame_scale;
+  float panel_x = screen_size.x - panel_width - 50.0f * m_frame_scale;
+  float panel_y = screen_size.y * 0.2f;
+
+  ImGui::SetNextWindowPos(ImVec2(panel_x, panel_y));
+  ImGui::SetNextWindowSize(ImVec2(panel_width, panel_height));
+  
+  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_game_info_fade_alpha);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.8f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+  
+  if (ImGui::Begin("Game Info", nullptr,
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                   ImGuiWindowFlags_NoCollapse))
+  {
+    // Game title
+    ImGui::PushFont(nullptr); // Use default font but larger
+    ImGui::TextWrapped("%s", game->GetName(m_title_database).c_str());
+    ImGui::PopFont();
+    
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Game details
+    ImGui::Text("Game ID: %s", game->GetGameID().c_str());
+    ImGui::Text("Region: %s", game->GetCountry() == DiscIO::Country::USA ? "NTSC-U" :
+                              game->GetCountry() == DiscIO::Country::Japan ? "NTSC-J" :
+                              game->GetCountry() == DiscIO::Country::Europe ? "PAL" : "Unknown");
+    
+    // Platform
+    std::string platform = "Unknown";
+    if (game->GetPlatform() == DiscIO::Platform::GameCubeDisc)
+      platform = "GameCube";
+    else if (game->GetPlatform() == DiscIO::Platform::WiiDisc)
+      platform = "Nintendo Wii";
+    else if (game->GetPlatform() == DiscIO::Platform::WiiWAD)
+      platform = "WiiWare/VC";
+    
+    ImGui::Text("Platform: %s", platform.c_str());
+    
+    // File size
+    u64 file_size = game->GetFileSize();
+    std::string size_str;
+    if (file_size > 1024 * 1024 * 1024)
+      size_str = fmt::format("{:.1f} GB", file_size / (1024.0 * 1024.0 * 1024.0));
+    else if (file_size > 1024 * 1024)
+      size_str = fmt::format("{:.1f} MB", file_size / (1024.0 * 1024.0));
+    else
+      size_str = fmt::format("{:.1f} KB", file_size / 1024.0);
+    
+    ImGui::Text("Size: %s", size_str.c_str());
+    
+#ifdef USE_RETRO_ACHIEVEMENTS
+    // Add RetroAchievements info if user is logged in
+    auto& achievement_manager = AchievementManager::GetInstance();
+    if (achievement_manager.HasAPIToken())
+    {
+      // Check if this is the currently loaded game
+      if (achievement_manager.IsGameLoaded())
+      {
+        rc_client_t* client = achievement_manager.GetClient();
+        if (client && rc_client_has_achievements(client))
+        {
+          rc_client_achievement_list_t* achievement_list = rc_client_create_achievement_list(
+              client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
+              RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+              
+          if (achievement_list)
+          {
+            int total_achievements = 0;
+            int unlocked_achievements = 0;
+            
+            for (u32 bx = 0; bx < achievement_list->num_buckets; bx++)
+            {
+              auto& bucket = achievement_list->buckets[bx];
+              for (u32 achievement = 0; achievement < bucket.num_achievements; achievement++)
+              {
+                total_achievements++;
+                
+                const rc_client_achievement_t* achievement_info = bucket.achievements[achievement];
+                if (achievement_info && achievement_info->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED)
+                  unlocked_achievements++;
+              }
+            }
+            
+            if (total_achievements > 0)
+            {
+              ImGui::Text("Achievements: %d/%d", unlocked_achievements, total_achievements);
+            }
+            else
+            {
+              ImGui::TextDisabled("Achievements: No achievements available");
+            }
+            
+            rc_client_destroy_achievement_list(achievement_list);
+          }
+          else
+          {
+            ImGui::TextDisabled("Achievements: Error loading achievement data");
+          }
+        }
+        else
+        {
+          ImGui::TextDisabled("Achievements: No achievements available");
+        }
+      }
+    }
+#endif  // USE_RETRO_ACHIEVEMENTS
+
+    ImGui::End();
+  }
+
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(1);
+}
+
+void ImGuiFrontend::SmoothScrollToGame(int target_index)
+{
+  if (target_index != m_selectedGameIdx)
+  {
+    m_selectedGameIdx = target_index;
+    m_target_scroll_offset = 0.0f; // Reset scroll offset when changing games
+    m_game_info_fade_alpha = 0.0f; // Keep game info hidden initially
+    m_game_selection_timer = 0.0f; // Reset timer when game selection changes
+  }
+}
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+std::pair<int, int> ImGuiFrontend::GetAchievementCountsForGame(const std::string& file_path)
+{
+  auto& achievement_manager = AchievementManager::GetInstance();
+  
+  // Check if user is logged in and has API token
+  if (!achievement_manager.HasAPIToken())
+    return {0, 0};
+    
+  rc_client_t* client = achievement_manager.GetClient();
+  if (!client)
+    return {0, 0};
+    
+  // Check if this is the currently loaded game (fastest and most reliable path)
+  auto* current_game_info = rc_client_get_game_info(client);
+  if (current_game_info && current_game_info->id != 0 && achievement_manager.IsGameLoaded())
+  {
+    // For the currently loaded game, we can get achievement data directly
+    if (rc_client_has_achievements(client))
+    {
+      rc_client_achievement_list_t* achievement_list = rc_client_create_achievement_list(
+          client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
+          RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+          
+      if (achievement_list)
+      {
+        int total_achievements = 0;
+        int unlocked_achievements = 0;
+        
+        for (u32 bx = 0; bx < achievement_list->num_buckets; bx++)
+        {
+          auto& bucket = achievement_list->buckets[bx];
+          for (u32 achievement = 0; achievement < bucket.num_achievements; achievement++)
+          {
+            total_achievements++;
+            
+            const rc_client_achievement_t* achievement_info = bucket.achievements[achievement];
+            if (achievement_info && achievement_info->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED)
+              unlocked_achievements++;
+          }
+        }
+        
+        rc_client_destroy_achievement_list(achievement_list);
+        return {unlocked_achievements, total_achievements};
+      }
+    }
+  }
+  
+  // For non-loaded games, check if we have cached data
+  // Try to extract game ID from file path
+  if (auto game_file = std::make_shared<UICommon::GameFile>(file_path))
+  {
+    std::string game_id = game_file->GetGameID();
+    if (!game_id.empty())
+    {
+      std::lock_guard<std::mutex> lock(g_cache_mutex);
+      auto it = g_game_achievement_cache.find(game_id);
+      if (it != g_game_achievement_cache.end() && it->second && it->second->loaded)
+      {
+        if (it->second->hasAchievements)
+        {
+          // Return total count only (no unlock data for browsing)
+          return {0, static_cast<int>(it->second->achievements.size())};
+        }
+        else
+        {
+          return {0, 0};
+        }
+      }
+      else if (it == g_game_achievement_cache.end() || !it->second || !it->second->loading)
+      {
+        // Start async loading if not already in progress
+        if (it == g_game_achievement_cache.end())
+          g_game_achievement_cache[game_id] = std::make_unique<GameAchievementData>();
+          
+        // Start async loading
+        std::thread(LoadAchievementDataForGame, file_path, game_id).detach();
+      }
+    }
+  }
+  
+  // Return 0/0 for unknown games or while loading
+  return {0, 0};
+}
+#else
+std::pair<int, int> ImGuiFrontend::GetAchievementCountsForGame(const std::string& file_path)
+{
+  return {0, 0};
+}
+#endif  // USE_RETRO_ACHIEVEMENTS
+
+AbstractTexture* ImGuiFrontend::GetHandleForGame(std::shared_ptr<UICommon::GameFile> game)
+{
+  std::string game_id = game->GetGameID();
+  auto result = m_cover_textures.find(game_id);
+  if (m_cover_textures.find(game_id) == m_cover_textures.end())
+  {
+    std::shared_ptr<AbstractTexture> texture = CreateCoverTexture(game);
+    if (texture == nullptr)
+    {
+      AbstractTexture* missing = GetOrCreateMissingTex();
+      m_cover_textures.emplace(game_id, missing);
+      return missing;
+    }
+    else
+    {
+      auto pair = m_cover_textures.emplace(game_id, std::move(texture));
+      return pair.first->second.get();
+    }
+  }
+
+  return result->second.get();
+}
+
+std::shared_ptr<AbstractTexture> CreateTextureFromPath(std::string path, bool is_theme_asset)
+{
+  std::string file_data;
+  if (!File::ReadFileToString(path, file_data))
+    return {};
+
+  std::vector<unsigned char> buffer = {file_data.begin(), file_data.end()};
+  if (buffer.empty())
+    return {};
+
+  int width, height, channels;
+  unsigned char* image_data = stbi_load_from_memory(buffer.data(), static_cast<int>(buffer.size()),
+                                                    &width, &height, &channels, 4);
+  if (!image_data)
+    return {};
+
+  TextureConfig tex_config(width, height, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                           AbstractTextureType::Texture_2D);
+
+  std::string texture_name = is_theme_asset ? "theme:" + path : "cover:" + path;
+  std::shared_ptr<AbstractTexture> tex = g_gfx->CreateTexture(tex_config, texture_name);
+  if (!tex)
+  {
+    stbi_image_free(image_data);
+    PanicAlertFmt("Failed to create ImGui texture");
+    return {};
+  }
+
+  tex->Load(0, width, height, width, image_data, sizeof(u32) * width * height);
+  stbi_image_free(image_data);
+
+  return std::move(tex);
+}
+
+std::shared_ptr<AbstractTexture>
+ImGuiFrontend::CreateCoverTexture(std::shared_ptr<UICommon::GameFile> game)
+{
+  if (!File::Exists(File::GetUserPath(D_COVERCACHE_IDX) + game->GetGameTDBID() + ".png"))
+  {
+    game->DownloadDefaultCover();
+  }
+
+  return std::move(
+      CreateTextureFromPath(File::GetUserPath(D_COVERCACHE_IDX) + game->GetGameTDBID() + ".png"));
+}
+
+AbstractTexture* ImGuiFrontend::GetOrCreateMissingTex()
+{
+  if (m_missing_tex != nullptr)
+    return m_missing_tex.get();
+
+  auto missing_tex = CreateTextureFromPath("Assets/missing.png");
+  m_missing_tex = std::move(missing_tex);
+
+  return m_missing_tex.get();
+}
+
+void ImGuiFrontend::LoadGameList()
+{
+  m_paths.clear();
+  m_games.clear();
+  m_displayed_games.clear();
+  m_paths = Config::GetIsoPaths();
+  for (auto dir : m_paths)
+  {
+    RecurseFolderForGames(dir);
+  }
+#ifdef WINRT_XBOX
+  // Load from the default path
+  auto localCachePath = winrt::to_string(
+      winrt::Windows::Storage::ApplicationData::Current().LocalCacheFolder().Path());
+  RecurseFolderForGames(localCachePath);
+#endif
+  FilterGamesForCategory();
+  if (m_selectedGameIdx >= m_displayed_games.size() || m_selectedGameIdx < 0)
+    m_selectedGameIdx = 0;
+}
+
+void ImGuiFrontend::FilterGamesForCategory()
+{
+  m_displayed_games.clear();
+
+  switch (m_ccat)
+  {
+  case CAll:
+    m_displayed_games.insert(m_displayed_games.begin(), m_games.begin(), m_games.end());
+    break;
+  case CWii:
+    for (auto& game : m_games)
+    {
+      if (game->GetPlatform() != DiscIO::Platform::WiiDisc)
+        continue;
+
+      m_displayed_games.push_back(game);
+    }
+    break;
+  case CGC:
+    for (auto& game : m_games)
+    {
+      if (game->GetPlatform() != DiscIO::Platform::GameCubeDisc)
+        continue;
+
+      m_displayed_games.push_back(game);
+    }
+    break;
+  case COther:
+    for (auto& game : m_games)
+    {
+      if (game->GetPlatform() == DiscIO::Platform::WiiDisc ||
+          game->GetPlatform() == DiscIO::Platform::GameCubeDisc)
+        continue;
+
+      m_displayed_games.push_back(game);
+    }
+    break;
+  }
+}
+
+void ImGuiFrontend::LoadThemes()
+{
+  std::string selected_theme = Config::Get(Config::FRONTEND_SELECTED_THEME);
+
+  m_themes.clear();
+  m_selected_theme = nullptr;
+
+  RecurseForThemes("Sys/FrontendThemes/");
+  RecurseForThemes(File::GetUserPath(D_THEMES_IDX));
+
+  if (!m_selected_theme)
+  {
+    m_selected_theme = &m_themes["Flipper 2.2 - Beached"];
+  }
+}
+
+void ImGuiFrontend::RecurseForThemes(std::string path)
+{
+  std::string selected_theme = Config::Get(Config::FRONTEND_SELECTED_THEME);
+
+  for (auto folder : std::filesystem::directory_iterator(path))
+  {
+    if (!folder.is_directory())
+    {
+      continue;
+    }
+
+    FrontendTheme theme{};
+    if (theme.TryLoad(folder.path().string()))
+    {
+      m_themes.emplace(theme.GetName(), theme);
+
+      if (theme.GetName() == selected_theme)
+      {
+        m_selected_theme = &m_themes[theme.GetName()];
+      }
+    }
+  }
+}
+
+void ImGuiFrontend::RecurseFolderForGames(std::string path)
+{
+  try
+  {
+    for (auto file : std::filesystem::directory_iterator(path))
+    {
+      if (file.is_directory())
+      {
+        RecurseFolderForGames(file.path().string());
+        continue;
+      }
+
+      if (!file.is_regular_file())
+        continue;
+
+      std::filesystem::path normalised =
+          std::filesystem::path(file.path().string()).make_preferred();
+      std::string game_path = normalised.string();
+      std::replace(game_path.begin(), game_path.end(), '\\', '/');
+      auto game = new UICommon::GameFile(game_path);
+
+      if (game && game->IsValid())
+        m_games.emplace_back(std::move(game));
+    }
+  }
+  catch (std::exception)
+  {
+    // This folder can't be opened.
+  }
+}
+
+void ImGuiFrontend::AddGameFolder(std::string path)
+{
+  m_paths.push_back(path);
+  Config::SetIsoPaths(m_paths);
+}
+
+bool ImGuiFrontend::TryInput(std::string expression, std::shared_ptr<ciface::Core::Device> device)
+{
+  auto* input = device->FindInput(expression);
+  if (input == nullptr)
+    return false;
+
+  return input->GetState() > 0.5f;
+}
+
+void DrawSettingsMenu(UIState* state, float frame_scale)
+{
+  if (ImGui::BeginListBox("##tabs", ImVec2(100 * frame_scale, -1)))
+  {
+    if (ImGui::Selectable("General", state->selectedTab == General))
+    {
+      state->selectedTab = General;
+    }
+    if (ImGui::Selectable("Interface", state->selectedTab == Interface))
+    {
+      state->selectedTab = Interface;
+    }
+    if (ImGui::Selectable("Graphics", state->selectedTab == Graphics))
+    {
+      state->selectedTab = Graphics;
+    }
+    if (ImGui::Selectable("Audio", state->selectedTab == Audio))
+    {
+      state->selectedTab = Audio;
+    }
+    if (ImGui::Selectable("Controls", state->selectedTab == Controls))
+    {
+      state->selectedTab = Controls;
+    }
+    if (ImGui::Selectable("GameCube", state->selectedTab == GC))
+    {
+      state->selectedTab = GC;
+    }
+    if (ImGui::Selectable("Wii", state->selectedTab == Wii))
+    {
+      state->selectedTab = Wii;
+    }
+    if (ImGui::Selectable("Advanced", state->selectedTab == Advanced))
+    {
+      state->selectedTab = Advanced;
+    }
+    if (ImGui::Selectable("Paths", state->selectedTab == Paths))
+    {
+      state->selectedTab = Paths;
+    }
+    if (ImGui::Selectable("Achievements", state->selectedTab == Achievements))
+    {
+      state->selectedTab = Achievements;
+    }
+    if (ImGui::Selectable("About", state->selectedTab == About))
+    {
+      state->selectedTab = About;
+    }
+
+    ImGui::EndListBox();
+  }
+
+  ImGui::SameLine();
+  if (ImGui::BeginChild("##tabview", ImVec2(-1, -1), true))
+  {
+    switch (state->selectedTab)
+    {
+    case General:
+      CreateGeneralTab(state);
+      break;
+    case Interface:
+      CreateInterfaceTab(state);
+      break;
+    case Graphics:
+      CreateGraphicsTab(state);
+      break;
+    case Audio:
+      CreateAudioTab(state);
+      break;
+    case Controls:
+      CreateControlsTab(state);
+      break;
+    case GC:
+      CreateGameCubeTab(state);
+      break;
+    case Wii:
+      CreateWiiTab(state);
+      break;
+    case Paths:
+      CreatePathsTab(state);
+      break;
+    case Advanced:
+      CreateAdvancedTab(state);
+      break;
+    case Achievements:
+      CreateAchievementsTab(state);
+      break;
+    case About:
+      ImGui::TextWrapped(
+          "Dolphin Emulator on UWP - Version 1.1.9.1 Beta (Based on Dolphin 2506-218)\n\n"
+          "This is a fork of Dolphin Emulator introducing Xbox support with a big picture "
+          "frontend\n\n"
+          "Credits:\n\n"
+          "Dolphin: for their amazing work on Dolphin Emulator\n"
+          "SirMangler: for their amazing work on porting Dolphin for UWP\n"
+          "worleydl: For his oct2024-rebase branch (it helped so much)\n"
+          "SirManglers Ko-Fi: https://ko-fi.com/sirmangler\n"
+          "Sterns Ko-Fi: https://ko-fi.com/stern\n\n"
+          "Dolphin Emulator is licensed under GPLv2+ and is not associated with Nintendo.");
+      break;
+    }
+
+    ImGui::EndChild();
+  }
+}
+
+std::shared_ptr<AbstractTexture> FrontendTheme::GetBackground(ThemeBG cat)
+{
+  return m_textures[cat];
+}
+
+bool FrontendTheme::TryLoad(std::string path)
+{
+  const auto SetThemeOrBackup = [=](ThemeBG target, ThemeBG backup, std::string basePath) {
+    // Try both PNG and JPEG/JPG formats
+    std::string pngPath = basePath + ".png";
+    std::string jpgPath = basePath + ".jpg";
+    std::string jpegPath = basePath + ".jpeg";
+
+    if (File::Exists(pngPath))
+    {
+      auto bg = CreateTextureFromPath(pngPath, true);
+      m_textures[target] = std::move(bg);
+    }
+    else if (File::Exists(jpgPath))
+    {
+      auto bg = CreateTextureFromPath(jpgPath, true);
+      m_textures[target] = std::move(bg);
+    }
+    else if (File::Exists(jpegPath))
+    {
+      auto bg = CreateTextureFromPath(jpegPath, true);
+      m_textures[target] = std::move(bg);
+    }
+
+    if (!m_textures[target])
+    {
+      if (m_textures[backup])
+      {
+        m_textures[target] = m_textures[backup];
+      }
+    }
+  };
+
+  // Check for required files in both PNG and JPEG formats
+  bool hasCarouselBg = File::Exists(path + "\\carousel_background_all.png") ||
+                       File::Exists(path + "\\carousel_background_all.jpg") ||
+                       File::Exists(path + "\\carousel_background_all.jpeg");
+
+  bool hasMenuBg = File::Exists(path + "\\menu_background.png") ||
+                   File::Exists(path + "\\menu_background.jpg") ||
+                   File::Exists(path + "\\menu_background.jpeg");
+
+  bool hasListUi = File::Exists(path + "\\list_ui.png") || File::Exists(path + "\\list_ui.jpg") ||
+                   File::Exists(path + "\\list_ui.jpeg");
+
+  bool hasCarouselUi = File::Exists(path + "\\carousel_ui.png") ||
+                       File::Exists(path + "\\carousel_ui.jpg") ||
+                       File::Exists(path + "\\carousel_ui.jpeg");
+
+  if (!hasCarouselBg || !hasMenuBg || !hasListUi || !hasCarouselUi)
+  {
+    return false;
+  }
+
+  // Try loading carousel background in either format
+  std::shared_ptr<AbstractTexture> all_bg;
+  if (File::Exists(path + "\\carousel_background_all.png"))
+    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.png", true);
+  else if (File::Exists(path + "\\carousel_background_all.jpg"))
+    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.jpg", true);
+  else if (File::Exists(path + "\\carousel_background_all.jpeg"))
+    all_bg = CreateTextureFromPath(path + "\\carousel_background_all.jpeg", true);
+
+  if (!all_bg)
+    return false;
+
+  m_textures[ThemeBG::BG_All] = all_bg;
+
+  // Try loading menu background in either format
+  std::shared_ptr<AbstractTexture> menu_bg;
+  if (File::Exists(path + "\\menu_background.png"))
+    menu_bg = CreateTextureFromPath(path + "\\menu_background.png", true);
+  else if (File::Exists(path + "\\menu_background.jpg"))
+    menu_bg = CreateTextureFromPath(path + "\\menu_background.jpg", true);
+  else if (File::Exists(path + "\\menu_background.jpeg"))
+    menu_bg = CreateTextureFromPath(path + "\\menu_background.jpeg", true);
+
+  if (!menu_bg)
+    return false;
+
+  m_textures[ThemeBG::BG_Menu] = menu_bg;
+
+  // Try loading list UI in either format
+  std::shared_ptr<AbstractTexture> list_ui_bg;
+  if (File::Exists(path + "\\list_ui.png"))
+    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.png", true);
+  else if (File::Exists(path + "\\list_ui.jpg"))
+    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.jpg", true);
+  else if (File::Exists(path + "\\list_ui.jpeg"))
+    list_ui_bg = CreateTextureFromPath(path + "\\list_ui.jpeg", true);
+
+  if (!list_ui_bg)
+    return false;
+
+  m_textures[ThemeBG::BG_List_UI] = list_ui_bg;
+
+  // Try loading carousel UI in either format
+  std::shared_ptr<AbstractTexture> carousel_ui_bg;
+  if (File::Exists(path + "\\carousel_ui.png"))
+    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.png", true);
+  else if (File::Exists(path + "\\carousel_ui.jpg"))
+    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.jpg", true);
+  else if (File::Exists(path + "\\carousel_ui.jpeg"))
+    carousel_ui_bg = CreateTextureFromPath(path + "\\carousel_ui.jpeg", true);
+
+  if (!carousel_ui_bg)
+    return false;
+
+  m_textures[ThemeBG::BG_Carousel_UI] = carousel_ui_bg;
+
+  // Load optional theme elements with fallbacks
+  SetThemeOrBackup(BG_Wii, BG_All, path + "\\carousel_background_wii");
+  SetThemeOrBackup(BG_GC, BG_All, path + "\\carousel_background_gamecube");
+  SetThemeOrBackup(BG_Other, BG_All, path + "\\carousel_background_other");
+  SetThemeOrBackup(BG_List, BG_Menu, path + "\\menu_background_list");
+  SetThemeOrBackup(BG_Netplay, BG_Menu, path + "\\menu_background_netplay");
+
+  m_name = std::filesystem::path(path).filename().string();
+
+  return true;
+}
+
+
+
+void DrawPropertiesDialog(UIState* state, float frame_scale)
+{
+  if (!state->propertiesGame)
+    return;
+
+  ImVec2 window_size = ImVec2(600 * frame_scale, 450 * frame_scale);
+  ImVec2 window_pos = ImVec2(ImGui::GetIO().DisplaySize.x / 2 - window_size.x / 2,
+                             ImGui::GetIO().DisplaySize.y / 2 - window_size.y / 2);
+
+  ImGui::SetNextWindowPos(window_pos);
+  ImGui::SetNextWindowSize(window_size);
+
+  std::string window_title = "Properties: " + state->propertiesGame->GetLongName();
+
+  if (ImGui::Begin(window_title.c_str(), &state->showPropertiesWindow,
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse))
+  {
+    // Tab bar
+    if (ImGui::BeginTabBar("PropertiesTabs"))
+    {
+      if (ImGui::BeginTabItem("Info"))
+      {
+        state->selectedPropertiesTab = Info;
+        CreatePropertiesInfoTab(state);
+        ImGui::EndTabItem();
+      }
+
+      if (ImGui::BeginTabItem("Game Config"))
+      {
+        state->selectedPropertiesTab = GameConfig;
+        CreatePropertiesGameConfigTab(state);
+        ImGui::EndTabItem();
+      }
+
+      if (ImGui::BeginTabItem("Patches"))
+      {
+        state->selectedPropertiesTab = Patches;
+        CreatePropertiesPatchesTab(state);
+        ImGui::EndTabItem();
+      }
+
+      if (ImGui::BeginTabItem("AR Codes"))
+      {
+        state->selectedPropertiesTab = ARCodes;
+        CreatePropertiesARCodesTab(state);
+        ImGui::EndTabItem();
+      }
+
+      if (ImGui::BeginTabItem("Gecko Codes"))
+      {
+        state->selectedPropertiesTab = GeckoCodes;
+        CreatePropertiesGeckoCodesTab(state);
+        ImGui::EndTabItem();
+      }
+
+      if (ImGui::BeginTabItem("Graphics Mods"))
+      {
+        state->selectedPropertiesTab = GraphicsMods;
+        CreatePropertiesGraphicsModsTab(state);
+        ImGui::EndTabItem();
+      }
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+      if (ImGui::BeginTabItem("Achievements"))
+      {
+        state->selectedPropertiesTab = PropertiesAchievements;
+        CreatePropertiesAchievementsTab(state);
+        ImGui::EndTabItem();
+      }
+#endif  // USE_RETRO_ACHIEVEMENTS
+
+      ImGui::EndTabBar();
+    }
+  }
+  ImGui::End();
+}
+
+void CreatePropertiesInfoTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  auto game = state->propertiesGame;
+
+  ImGui::BeginGroup();
+  ImGui::Text("File Details");
+  ImGui::Separator();
+
+  ImGui::Text("File Name: %s", game->GetFileName().c_str());
+  ImGui::Text("File Path: %s", game->GetFilePath().c_str());
+
+  // File size
+  u64 file_size = game->GetFileSize();
+  std::string size_str;
+  if (file_size > 1024 * 1024 * 1024)
+    size_str = fmt::format("{:.2f} GB", file_size / (1024.0 * 1024.0 * 1024.0));
+  else if (file_size > 1024 * 1024)
+    size_str = fmt::format("{:.2f} MB", file_size / (1024.0 * 1024.0));
+  else
+    size_str = fmt::format("{:.2f} KB", file_size / 1024.0);
+
+  ImGui::Text("File Size: %s", size_str.c_str());
+  ImGui::EndGroup();
+
+  ImGui::Spacing();
+  ImGui::Spacing();
+
+  ImGui::BeginGroup();
+  ImGui::Text("Game Details");
+  ImGui::Separator();
+
+  ImGui::Text("Internal Name: %s", game->GetInternalName().c_str());
+  ImGui::Text("Game ID: %s", game->GetGameID().c_str());
+  ImGui::Text("Title ID: %016llx", game->GetTitleID());
+  ImGui::Text("Revision: %u", game->GetRevision());
+
+  // Region
+  std::string region = "Unknown";
+  switch (game->GetCountry())
+  {
+  case DiscIO::Country::Europe:
+    region = "Europe (PAL)";
+    break;
+  case DiscIO::Country::Japan:
+    region = "Japan (NTSC-J)";
+    break;
+  case DiscIO::Country::USA:
+    region = "USA (NTSC-U)";
+    break;
+  case DiscIO::Country::Australia:
+    region = "Australia (PAL)";
+    break;
+  case DiscIO::Country::France:
+    region = "France (PAL)";
+    break;
+  case DiscIO::Country::Germany:
+    region = "Germany (PAL)";
+    break;
+  case DiscIO::Country::Italy:
+    region = "Italy (PAL)";
+    break;
+  case DiscIO::Country::Korea:
+    region = "Korea (NTSC-K)";
+    break;
+  case DiscIO::Country::Netherlands:
+    region = "Netherlands (PAL)";
+    break;
+  case DiscIO::Country::Russia:
+    region = "Russia (PAL)";
+    break;
+  case DiscIO::Country::Spain:
+    region = "Spain (PAL)";
+    break;
+  case DiscIO::Country::Taiwan:
+    region = "Taiwan (NTSC-T)";
+    break;
+  default:
+    region = "Unknown";
+    break;
+  }
+  ImGui::Text("Region: %s", region.c_str());
+
+  // Platform
+  std::string platform = "Unknown";
+  switch (game->GetPlatform())
+  {
+  case DiscIO::Platform::GameCubeDisc:
+    platform = "GameCube Disc";
+    break;
+  case DiscIO::Platform::WiiDisc:
+    platform = "Wii Disc";
+    break;
+  case DiscIO::Platform::WiiWAD:
+    platform = "WiiWare/Virtual Console";
+    break;
+  case DiscIO::Platform::ELFOrDOL:
+    platform = "ELF/DOL";
+    break;
+  default:
+    platform = "Unknown";
+    break;
+  }
+  ImGui::Text("Platform: %s", platform.c_str());
+
+  ImGui::EndGroup();
+}
+
+void CreatePropertiesGameConfigTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  const std::string game_id = state->propertiesGame->GetGameID();
+  const u16 revision = state->propertiesGame->GetRevision();
+  
+  ImGui::Text("Game-specific configuration for: %s", game_id.c_str());
+  ImGui::Separator();
+
+  // Load game-specific config layer
+  static std::unique_ptr<Config::Layer> game_config_layer;
+  if (!game_config_layer)
+  {
+    game_config_layer = std::make_unique<Config::Layer>(
+        ConfigLoaders::GenerateLocalGameConfigLoader(game_id, revision));
+  }
+
+  // Core Settings
+  if (ImGui::CollapsingHeader("Core Settings", ImGuiTreeNodeFlags_DefaultOpen))
+  {
+    // CPU Core selection
+    bool use_jit = game_config_layer->Get(Config::MAIN_CPU_CORE) == PowerPC::CPUCore::JIT64;
+    if (ImGui::Checkbox("Enable JIT (recommended)", &use_jit))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_CPU_CORE, 
+                              use_jit ? PowerPC::CPUCore::JIT64 : PowerPC::CPUCore::Interpreter);
+    }
+
+    // Dual Core
+    bool dual_core = game_config_layer->Get(Config::MAIN_CPU_THREAD);
+    if (ImGui::Checkbox("Enable Dual Core (speedup)", &dual_core))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_CPU_THREAD, dual_core);
+    }
+
+    // MMU
+    bool mmu = game_config_layer->Get(Config::MAIN_MMU);
+    if (ImGui::Checkbox("Enable MMU (required for some games)", &mmu))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_MMU, mmu);
+    }
+
+    // Synchronize GPU Thread
+    bool sync_gpu = game_config_layer->Get(Config::MAIN_SYNC_GPU);
+    if (ImGui::Checkbox("Synchronize GPU Thread", &sync_gpu))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_SYNC_GPU, sync_gpu);
+    }
+
+    // CPU Clock Override
+    int cpu_clock_override = static_cast<int>(game_config_layer->Get(Config::MAIN_OVERCLOCK) * 100.0f);
+    if (ImGui::SliderInt("CPU Clock Override %%", &cpu_clock_override, 1, 300))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK, cpu_clock_override / 100.0f);
+      Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK_ENABLE, cpu_clock_override != 100);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset##cpu"))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK, 1.0f);
+      Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK_ENABLE, false);
+    }
+  }
+
+  // Audio Settings
+  if (ImGui::CollapsingHeader("Audio Settings"))
+  {
+    bool use_dsp_hle = game_config_layer->Get(Config::MAIN_DSP_HLE);
+    if (ImGui::Checkbox("DSP HLE Emulation (fast)", &use_dsp_hle))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_DSP_HLE, use_dsp_hle);
+    }
+
+    int audio_latency = game_config_layer->Get(Config::MAIN_AUDIO_LATENCY);
+    if (ImGui::SliderInt("Audio Latency", &audio_latency, 0, 300))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_AUDIO_LATENCY, audio_latency);
+    }
+  }
+
+  // Game-specific Hacks
+  if (ImGui::CollapsingHeader("Game-specific Hacks"))
+  {
+    bool fprf = game_config_layer->Get(Config::MAIN_FPRF);
+    if (ImGui::Checkbox("Enable FPRF", &fprf))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_FPRF, fprf);
+    }
+
+    bool accurate_nans = game_config_layer->Get(Config::MAIN_ACCURATE_NANS);
+    if (ImGui::Checkbox("Accurate NaN Handling", &accurate_nans))
+    {
+      Config::SetBaseOrCurrent(Config::MAIN_ACCURATE_NANS, accurate_nans);
+    }
+  }
+
+  ImGui::Separator();
+  if (PrimaryButton("Save Game Config"))
+  {
+    // Save the current configuration to the game-specific INI file
+    std::string ini_path = File::GetUserPath(D_GAMESETTINGS_IDX) + game_id + ".ini";
+    Config::Save();
+    ImGui::OpenPopup("Config Saved");
+  }
+  ImGui::SameLine();
+  if (DangerButton("Reset to Defaults"))
+  {
+    ImGui::OpenPopup("Reset Confirm");
+  }
+
+  // Popup modals
+  if (ImGui::BeginPopupModal("Config Saved", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Game configuration saved to %s.ini", game_id.c_str());
+    if (ImGui::Button("OK"))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+
+  if (ImGui::BeginPopupModal("Reset Confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Are you sure you want to reset all settings to defaults?");
+    if (ImGui::Button("Yes"))
+    {
+      // Reset all game-specific settings
+      std::string ini_path = File::GetUserPath(D_GAMESETTINGS_IDX) + game_id + ".ini";
+      if (File::Exists(ini_path))
+      {
+        File::Delete(ini_path);
+        Config::OnConfigChanged();
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+}
+
+void CreatePropertiesPatchesTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  const std::string game_id = state->propertiesGame->GetGameID();
+  
+  ImGui::Text("Patches for: %s", game_id.c_str());
+  ImGui::Separator();
+
+  // Load patches for this game
+  std::vector<PatchEngine::Patch> patches;
+  
+  // Create INI files for loading patches
+  Common::IniFile global_ini;
+  Common::IniFile local_ini;
+  
+  // Load patch data
+  std::string global_patches_path = File::GetSysDirectory() + GAMESETTINGS_DIR DIR_SEP + game_id + ".ini";
+  std::string local_patches_path = File::GetUserPath(D_GAMESETTINGS_IDX) + game_id + ".ini";
+  
+  global_ini.Load(global_patches_path);
+  local_ini.Load(local_patches_path);
+  
+  PatchEngine::LoadPatchSection("OnFrame_Enabled", &patches, global_ini, local_ini);
+  
+  // Search bar
+  static char search_buffer[256] = "";
+  ImGui::SetNextItemWidth(200.0f);
+  ImGui::InputText("Search patches", search_buffer, sizeof(search_buffer));
+  ImGui::SameLine();
+  if (ImGui::Button("Clear"))
+  {
+    search_buffer[0] = '\0';
+  }
+
+  // Enable patches checkbox
+  bool patches_enabled = Config::Get(Config::MAIN_ENABLE_CHEATS);
+  if (ImGui::Checkbox("Enable Patches", &patches_enabled))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_ENABLE_CHEATS, patches_enabled);
+  }
+
+  ImGui::Separator();
+
+  if (ImGui::BeginChild("PatchesList", ImVec2(0, 300), true))
+  {
+    for (size_t i = 0; i < patches.size(); ++i)
+    {
+      auto& patch = patches[i];
+      
+      // Filter based on search
+      if (strlen(search_buffer) > 0)
+      {
+        std::string patch_lower = patch.name;
+        std::string search_lower = search_buffer;
+        std::transform(patch_lower.begin(), patch_lower.end(), patch_lower.begin(), ::tolower);
+        std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+        
+        if (patch_lower.find(search_lower) == std::string::npos)
+          continue;
+      }
+
+      ImGui::PushID(static_cast<int>(i));
+      
+      bool enabled = patch.enabled;
+      if (ImGui::Checkbox("", &enabled))
+      {
+        patch.enabled = enabled;
+        PatchEngine::SavePatchSection(&local_ini, patches);
+        local_ini.Save(local_patches_path);
+      }
+      ImGui::SameLine();
+      
+      if (ImGui::TreeNode(patch.name.c_str()))
+      {
+        ImGui::Text("Patch entries (%zu):", patch.entries.size());
+        
+        // Display patch entries in a table format
+        if (ImGui::BeginTable("PatchEntries", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        {
+          ImGui::TableSetupColumn("Type");
+          ImGui::TableSetupColumn("Address");
+          ImGui::TableSetupColumn("Value");
+          ImGui::TableHeadersRow();
+          
+          for (const auto& entry : patch.entries)
+          {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            
+            // Display entry type
+            switch (entry.type)
+            {
+              case PatchEngine::PatchType::Patch8Bit:
+                ImGui::Text("8-bit");
+                break;
+              case PatchEngine::PatchType::Patch16Bit:
+                ImGui::Text("16-bit");
+                break;
+              case PatchEngine::PatchType::Patch32Bit:
+                ImGui::Text("32-bit");
+                break;
+              default:
+                ImGui::Text("Unknown");
+                break;
+            }
+            
+            ImGui::TableNextColumn();
+            ImGui::Text("0x%08X", entry.address);
+            
+            ImGui::TableNextColumn();
+            ImGui::Text("0x%08X", entry.value);
+          }
+          
+          ImGui::EndTable();
+        }
+        
+        ImGui::Separator();
+        if (ImGui::Button("Copy Patch Data"))
+        {
+          std::string patch_text = "Patch: " + patch.name + "\n";
+          patch_text += "Entries:\n";
+          
+          for (const auto& entry : patch.entries)
+          {
+            patch_text += fmt::format("0x{:08X} = 0x{:08X}\n", entry.address, entry.value);
+          }
+          
+          ImGui::SetClipboardText(patch_text.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Edit Patch"))
+        {
+          ImGui::OpenPopup("Edit Patch");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Remove"))
+        {
+          patches.erase(patches.begin() + i);
+          PatchEngine::SavePatchSection(&local_ini, patches);
+          local_ini.Save(local_patches_path);
+          ImGui::TreePop();
+          ImGui::PopID();
+          break;
+        }
+        
+        ImGui::TreePop();
+      }
+      
+      ImGui::PopID();
+    }
+  }
+  ImGui::EndChild();
+
+  ImGui::Separator();
+  
+  // Control buttons
+  if (ImGui::Button("Enable All"))
+  {
+    for (auto& patch : patches)
+      patch.enabled = true;
+    PatchEngine::SavePatchSection(&local_ini, patches);
+    local_ini.Save(local_patches_path);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Disable All"))
+  {
+    for (auto& patch : patches)
+      patch.enabled = false;
+    PatchEngine::SavePatchSection(&local_ini, patches);
+    local_ini.Save(local_patches_path);
+  }
+  ImGui::SameLine();
+  if (PrimaryButton("Add Custom Patch"))
+  {
+    ImGui::OpenPopup("Add Patch");
+  }
+  ImGui::SameLine();
+  if (SecondaryButton("Reload from Disk"))
+  {
+    // Reload patches from the game's INI files
+    patches.clear();
+    global_ini.Load(global_patches_path);
+    local_ini.Load(local_patches_path);
+    PatchEngine::LoadPatchSection("OnFrame_Enabled", &patches, global_ini, local_ini);
+  }
+
+  // Add patch modal
+  if (ImGui::BeginPopupModal("Add Patch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    static char patch_name[256] = "";
+    static char patch_entries[1024] = "";
+    
+    ImGui::Text("Add Custom Patch");
+    ImGui::Separator();
+    
+    ImGui::InputText("Patch Name", patch_name, sizeof(patch_name));
+    ImGui::InputTextMultiline("Patch Entries", patch_entries, sizeof(patch_entries), ImVec2(400, 200));
+    
+    ImGui::TextWrapped("Format: address=value (e.g., 0x80123456=0x12345678)");
+    
+    if (ImGui::Button("Add"))
+    {
+      if (strlen(patch_name) > 0 && strlen(patch_entries) > 0)
+      {
+        PatchEngine::Patch new_patch;
+        new_patch.name = patch_name;
+        new_patch.enabled = false;
+        new_patch.user_defined = true;
+        
+        // Parse patch entries
+        std::istringstream iss(patch_entries);
+        std::string line;
+        while (std::getline(iss, line))
+        {
+          size_t eq_pos = line.find('=');
+          if (eq_pos != std::string::npos)
+          {
+            try
+            {
+              std::string addr_str = line.substr(0, eq_pos);
+              std::string val_str = line.substr(eq_pos + 1);
+              
+              PatchEngine::PatchEntry entry;
+              entry.address = std::stoul(addr_str, nullptr, 0); // Auto-detect base
+              entry.value = std::stoul(val_str, nullptr, 0);
+              entry.type = PatchEngine::PatchType::Patch32Bit; // Default to 32-bit
+              
+              new_patch.entries.push_back(entry);
+            }
+            catch (const std::exception&)
+            {
+              // Skip invalid lines
+            }
+          }
+        }
+        
+        if (!new_patch.entries.empty())
+        {
+          patches.push_back(new_patch);
+          PatchEngine::SavePatchSection(&local_ini, patches);
+          local_ini.Save(local_patches_path);
+        }
+        
+        patch_name[0] = '\0';
+        patch_entries[0] = '\0';
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  // Edit patch modal  
+  if (ImGui::BeginPopupModal("Edit Patch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    static char edit_name[256] = "";
+    
+    ImGui::Text("Edit Patch");
+    ImGui::Separator();
+    
+    ImGui::InputText("Patch Name", edit_name, sizeof(edit_name));
+    
+    if (ImGui::Button("Save"))
+    {
+      // Save edited patch
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
+void CreatePropertiesARCodesTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  const std::string game_id = state->propertiesGame->GetGameID();
+  
+  ImGui::Text("Action Replay Codes for: %s", game_id.c_str());
+  ImGui::Separator();
+
+  // Load AR codes for this game
+  Common::IniFile global_ar_ini;
+  Common::IniFile local_ar_ini;
+  
+  std::string global_ar_path = File::GetSysDirectory() + GAMESETTINGS_DIR DIR_SEP + game_id + ".ini";
+  std::string local_ar_path = File::GetUserPath(D_GAMESETTINGS_IDX) + game_id + ".ini";
+  
+  global_ar_ini.Load(global_ar_path);
+  local_ar_ini.Load(local_ar_path);
+  
+  std::vector<ActionReplay::ARCode> ar_codes = ActionReplay::LoadCodes(global_ar_ini, local_ar_ini);
+  
+  // Search functionality
+  static char ar_search[256] = "";
+  ImGui::SetNextItemWidth(200.0f);
+  ImGui::InputText("Search AR codes", ar_search, sizeof(ar_search));
+  ImGui::SameLine();
+  static bool show_enabled_only = false;
+  ImGui::Checkbox("Show enabled only", &show_enabled_only);
+
+  ImGui::Separator();
+
+  // Display codes
+  if (ImGui::BeginChild("ARCodesList", ImVec2(0, 350), true))
+  {
+    for (size_t i = 0; i < ar_codes.size(); ++i)
+    {
+      auto& ar_code = ar_codes[i];
+      
+      // Filter based on search
+      if (strlen(ar_search) > 0)
+      {
+        std::string name_lower = ar_code.name;
+        std::string search_lower = ar_search;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+        
+        if (name_lower.find(search_lower) == std::string::npos)
+          continue;
+      }
+      
+      if (show_enabled_only && !ar_code.enabled)
+        continue;
+
+      ImGui::PushID(static_cast<int>(i));
+      
+      // Checkbox for enabling/disabling
+      bool enabled = ar_code.enabled;
+      if (ImGui::Checkbox("", &enabled))
+      {
+        ar_code.enabled = enabled;
+        ActionReplay::SaveCodes(&local_ar_ini, ar_codes);
+        local_ar_ini.Save(local_ar_path);
+      }
+      ImGui::SameLine();
+      
+      // Expandable tree node for each code
+      bool node_open = ImGui::TreeNode(ar_code.name.c_str());
+      
+      // Show enabled indicator
+      if (ar_code.enabled)
+      {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "[ACTIVE]");
+      }
+      
+      if (node_open)
+      {
+        ImGui::Text("Code entries:");
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Use monospace if available
+        
+        for (const auto& entry : ar_code.ops)
+        {
+          ImGui::Text("%08X %08X", entry.cmd_addr, entry.value);
+        }
+        
+        ImGui::PopFont();
+        
+        ImGui::Separator();
+        if (ImGui::Button("Copy Code"))
+        {
+          std::string code_text;
+          for (const auto& entry : ar_code.ops)
+          {
+            code_text += fmt::format("{:08X} {:08X}\n", entry.cmd_addr, entry.value);
+          }
+          ImGui::SetClipboardText(code_text.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Edit Code"))
+        {
+          ImGui::OpenPopup("Edit AR Code");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete"))
+        {
+          ar_codes.erase(ar_codes.begin() + i);
+          ActionReplay::SaveCodes(&local_ar_ini, ar_codes);
+          local_ar_ini.Save(local_ar_path);
+          ImGui::TreePop();
+          ImGui::PopID();
+          break;
+        }
+        
+        ImGui::TreePop();
+      }
+      
+      ImGui::PopID();
+    }
+  }
+  ImGui::EndChild();
+
+  ImGui::Separator();
+  
+  // Control buttons
+  if (ImGui::Button("Add New AR Code"))
+  {
+    ImGui::OpenPopup("Add AR Code");
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Enable All"))
+  {
+    for (auto& code : ar_codes)
+      code.enabled = true;
+    ActionReplay::SaveCodes(&local_ar_ini, ar_codes);
+    local_ar_ini.Save(local_ar_path);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Disable All"))
+  {
+    for (auto& code : ar_codes)
+      code.enabled = false;
+    ActionReplay::SaveCodes(&local_ar_ini, ar_codes);
+    local_ar_ini.Save(local_ar_path);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Load from File"))
+  {
+    // Load AR codes from file - would need file dialog
+    ImGui::OpenPopup("Load AR Codes");
+  }
+
+  // Add AR code modal
+  if (ImGui::BeginPopupModal("Add AR Code", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    static char new_name[256] = "";
+    static char new_code[1024] = "";
+    
+    ImGui::Text("Add New Action Replay Code");
+    ImGui::Separator();
+    
+    ImGui::InputText("Code Name", new_name, sizeof(new_name));
+    ImGui::InputTextMultiline("AR Code", new_code, sizeof(new_code), ImVec2(400, 150));
+    
+    ImGui::Text("Format: XXXXXXXX YYYYYYYY (address value pairs)");
+    
+    if (ImGui::Button("Add"))
+    {
+      if (strlen(new_name) > 0 && strlen(new_code) > 0)
+      {
+        ActionReplay::ARCode new_ar_code;
+        new_ar_code.name = new_name;
+        new_ar_code.enabled = false;
+        new_ar_code.user_defined = true;
+        
+        // Parse the code text
+        std::istringstream iss(new_code);
+        std::string line;
+        while (std::getline(iss, line))
+        {
+          if (line.length() >= 17) // "XXXXXXXX YYYYYYYY"
+          {
+            ActionReplay::AREntry entry;
+            std::string addr_str = line.substr(0, 8);
+            std::string val_str = line.substr(9, 8);
+            
+            try
+            {
+              entry.cmd_addr = std::stoul(addr_str, nullptr, 16);
+              entry.value = std::stoul(val_str, nullptr, 16);
+              new_ar_code.ops.push_back(entry);
+            }
+            catch (const std::exception&)
+            {
+              // Skip invalid lines
+            }
+          }
+        }
+        
+        if (!new_ar_code.ops.empty())
+        {
+          ar_codes.push_back(new_ar_code);
+          ActionReplay::SaveCodes(&local_ar_ini, ar_codes);
+          local_ar_ini.Save(local_ar_path);
+        }
+        
+        new_name[0] = '\0';
+        new_code[0] = '\0';
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  // Load AR codes modal
+  if (ImGui::BeginPopupModal("Load AR Codes", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Load Action Replay codes from file");
+    ImGui::Separator();
+    
+    static char file_path[512] = "";
+    ImGui::InputText("File path", file_path, sizeof(file_path));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse"))
+    {
+      // File dialog would go here
+    }
+    
+    if (ImGui::Button("Load"))
+    {
+      if (strlen(file_path) > 0)
+      {
+        // ActionReplay::LoadCodesFromFile would be implemented
+        ImGui::CloseCurrentPopup();
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
+void CreatePropertiesGeckoCodesTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  const std::string game_id = state->propertiesGame->GetGameID();
+  
+  ImGui::Text("Gecko Codes for: %s", game_id.c_str());
+  ImGui::Separator();
+
+  // Load Gecko codes for this game
+  Common::IniFile global_gecko_ini;
+  Common::IniFile local_gecko_ini;
+  
+  std::string global_gecko_path = File::GetSysDirectory() + GAMESETTINGS_DIR DIR_SEP + game_id + ".ini";
+  std::string local_gecko_path = File::GetUserPath(D_GAMESETTINGS_IDX) + game_id + ".ini";
+  
+  global_gecko_ini.Load(global_gecko_path);
+  local_gecko_ini.Load(local_gecko_path);
+  
+  std::vector<Gecko::GeckoCode> gecko_codes = Gecko::LoadCodes(global_gecko_ini, local_gecko_ini);
+  
+  // Search and options
+  static char gecko_search[256] = "";
+  ImGui::SetNextItemWidth(200.0f);
+  ImGui::InputText("Search codes", gecko_search, sizeof(gecko_search));
+  ImGui::SameLine();
+  
+  bool codes_enabled = Config::Get(Config::MAIN_ENABLE_CHEATS);
+  if (ImGui::Checkbox("Enable Gecko Codes", &codes_enabled))
+  {
+    Config::SetBaseOrCurrent(Config::MAIN_ENABLE_CHEATS, codes_enabled);
+  }
+
+  ImGui::Separator();
+
+  if (ImGui::BeginChild("GeckoCodesList", ImVec2(0, 400), true))
+  {
+    for (size_t i = 0; i < gecko_codes.size(); ++i)
+    {
+      auto& gecko_code = gecko_codes[i];
+      
+      // Search filter
+      if (strlen(gecko_search) > 0)
+      {
+        std::string combined = gecko_code.name + " " + gecko_code.creator;
+        // Add notes to search
+        for (const auto& note : gecko_code.notes)
+        {
+          combined += " " + note;
+        }
+        std::transform(combined.begin(), combined.end(), combined.begin(), ::tolower);
+        std::string search_lower = gecko_search;
+        std::transform(search_lower.begin(), search_lower.end(), search_lower.begin(), ::tolower);
+        
+        if (combined.find(search_lower) == std::string::npos)
+          continue;
+      }
+
+      ImGui::PushID(static_cast<int>(i));
+      
+      // Checkbox for enabling/disabling
+      bool enabled = gecko_code.enabled;
+      if (ImGui::Checkbox("", &enabled))
+      {
+        gecko_code.enabled = enabled;
+        Gecko::SaveCodes(local_gecko_ini, gecko_codes);
+        local_gecko_ini.Save(local_gecko_path);
+      }
+      ImGui::SameLine();
+      
+      // Color coding based on code source
+      ImVec4 name_color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // White default
+      if (!gecko_code.creator.empty())
+      {
+        if (gecko_code.creator.find("Official") != std::string::npos)
+          name_color = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); // Green for official
+        else
+          name_color = ImVec4(0.0f, 0.8f, 1.0f, 1.0f); // Light blue for community
+      }
+      
+      // Tree node for each code
+      ImGui::PushStyleColor(ImGuiCol_Text, name_color);
+      bool node_open = ImGui::TreeNode(gecko_code.name.c_str());
+      ImGui::PopStyleColor();
+      
+      // Status indicators
+      if (gecko_code.enabled)
+      {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "[ON]");
+      }
+      
+      if (node_open)
+      {
+        if (!gecko_code.notes.empty())
+        {
+          ImGui::Text("Notes:");
+          for (const auto& note : gecko_code.notes)
+          {
+            ImGui::TextWrapped("- %s", note.c_str());
+          }
+        }
+        
+        if (!gecko_code.creator.empty())
+        {
+          ImGui::Text("Creator: %s", gecko_code.creator.c_str());
+        }
+        
+        // Code display with basic formatting
+        ImGui::Separator();
+        ImGui::Text("Gecko Code:");
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.15f, 1.0f));
+        if (ImGui::BeginChild("CodeDisplay", ImVec2(0, 150), true))
+        {
+          ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // Monospace
+          
+          for (const auto& code : gecko_code.codes)
+          {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%08X", code.address);
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), " %08X", code.data);
+          }
+          
+          ImGui::PopFont();
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        
+        // Action buttons
+        ImGui::Separator();
+        if (ImGui::Button("Copy Code"))
+        {
+          std::string code_text;
+          for (const auto& code : gecko_code.codes)
+          {
+            code_text += fmt::format("{:08X} {:08X}\n", code.address, code.data);
+          }
+          ImGui::SetClipboardText(code_text.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Edit"))
+        {
+          ImGui::OpenPopup("Edit Gecko Code");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete"))
+        {
+          gecko_codes.erase(gecko_codes.begin() + i);
+          Gecko::SaveCodes(local_gecko_ini, gecko_codes);
+          local_gecko_ini.Save(local_gecko_path);
+          ImGui::TreePop();
+          ImGui::PopID();
+          break;
+        }
+        
+        ImGui::TreePop();
+      }
+      
+      ImGui::PopID();
+    }
+  }
+  ImGui::EndChild();
+
+  ImGui::Separator();
+  
+  // Control buttons
+  if (ImGui::Button("Add New Code"))
+  {
+    ImGui::OpenPopup("Add Gecko Code");
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Download Codes"))
+  {
+    ImGui::OpenPopup("Download Codes");
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Enable All"))
+  {
+    for (auto& code : gecko_codes)
+      code.enabled = true;
+    Gecko::SaveCodes(local_gecko_ini, gecko_codes);
+    local_gecko_ini.Save(local_gecko_path);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Disable All"))
+  {
+    for (auto& code : gecko_codes)
+      code.enabled = false;
+    Gecko::SaveCodes(local_gecko_ini, gecko_codes);
+    local_gecko_ini.Save(local_gecko_path);
+  }
+
+  // Add new Gecko code modal
+  if (ImGui::BeginPopupModal("Add Gecko Code", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    static char new_name[256] = "";
+    static char new_notes[512] = "";
+    static char new_creator[128] = "";
+    static char new_code[1024] = "";
+    
+    ImGui::Text("Add New Gecko Code");
+    ImGui::Separator();
+    
+    ImGui::InputText("Name", new_name, sizeof(new_name));
+    ImGui::InputTextMultiline("Notes", new_notes, sizeof(new_notes), ImVec2(500, 60));
+    ImGui::InputText("Creator", new_creator, sizeof(new_creator));
+    ImGui::InputTextMultiline("Gecko Code", new_code, sizeof(new_code), ImVec2(500, 200));
+    
+    ImGui::TextWrapped("Format: XXXXXXXX YYYYYYYY (8-digit address followed by 8-digit value)");
+    
+    if (ImGui::Button("Add"))
+    {
+      if (strlen(new_name) > 0 && strlen(new_code) > 0)
+      {
+        Gecko::GeckoCode new_gecko_code;
+        new_gecko_code.name = new_name;
+        if (strlen(new_notes) > 0)
+        {
+          new_gecko_code.notes.push_back(new_notes);
+        }
+        new_gecko_code.creator = strlen(new_creator) > 0 ? new_creator : "User";
+        new_gecko_code.enabled = false;
+        new_gecko_code.user_defined = true;
+        
+        // Parse the code text
+        std::istringstream iss(new_code);
+        std::string line;
+        while (std::getline(iss, line))
+        {
+          if (line.length() >= 17) // "XXXXXXXX YYYYYYYY"
+          {
+            Gecko::GeckoCode::Code code;
+            std::string addr_str = line.substr(0, 8);
+            std::string data_str = line.substr(9, 8);
+            
+            try
+            {
+              code.address = std::stoul(addr_str, nullptr, 16);
+              code.data = std::stoul(data_str, nullptr, 16);
+              code.original_line = line;
+              new_gecko_code.codes.push_back(code);
+            }
+            catch (const std::exception&)
+            {
+              // Skip invalid lines
+            }
+          }
+        }
+        
+        if (!new_gecko_code.codes.empty())
+        {
+          gecko_codes.push_back(new_gecko_code);
+          Gecko::SaveCodes(local_gecko_ini, gecko_codes);
+          local_gecko_ini.Save(local_gecko_path);
+        }
+        
+        new_name[0] = '\0';
+        new_notes[0] = '\0';
+        new_creator[0] = '\0';
+        new_code[0] = '\0';
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  // Download codes modal
+  if (ImGui::BeginPopupModal("Download Codes", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Download Gecko Codes from Database");
+    ImGui::Separator();
+    
+    ImGui::Text("This feature would connect to the Gecko code database");
+    ImGui::Text("and download codes for: %s", game_id.c_str());
+    ImGui::Separator();
+    
+    if (ImGui::Button("Open Gecko Codes Website"))
+    {
+      // Open web browser to gecko codes site
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
+void CreatePropertiesGraphicsModsTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+  const std::string game_id = state->propertiesGame->GetGameID();
+  ImGui::Text("Graphics Modifications for: %s", game_id.c_str());
+  ImGui::Separator();
+
+  // Check for graphics mods directory
+  std::string graphics_mod_path = File::GetUserPath(D_GRAPHICSMOD_IDX) + game_id + "/";
+  bool mods_dir_exists = File::IsDirectory(graphics_mod_path);
+  
+  if (!mods_dir_exists)
+  {
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "No graphics mods directory found for this game.");
+    ImGui::Text("Graphics mods should be placed in:");
+    ImGui::TextWrapped("%s", graphics_mod_path.c_str());
+    
+    if (ImGui::Button("Create Mods Directory"))
+    {
+      File::CreateDir(graphics_mod_path);
+      mods_dir_exists = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Open Mods Folder"))
+    {
+      // Open file explorer to mods directory
+    }
+    return;
+  }
+
+  // Enable graphics mods globally
+  bool graphics_mods_enabled = Config::Get(Config::GFX_MODS_ENABLE);
+  if (ImGui::Checkbox("Enable Graphics Mods", &graphics_mods_enabled))
+  {
+    Config::SetBaseOrCurrent(Config::GFX_MODS_ENABLE, graphics_mods_enabled);
+  }
+
+  ImGui::Separator();
+
+  // Scan for available graphics mods
+  File::FSTEntry root = File::ScanDirectoryTree(graphics_mod_path, true);
+  std::vector<std::string> mod_directories;
+  
+  for (const auto& entry : root.children)
+  {
+    if (entry.isDirectory)
+    {
+      mod_directories.push_back(entry.physicalName);
+    }
+  }
+  
+  if (mod_directories.empty())
+  {
+    ImGui::Text("No graphics mods found in:");
+    ImGui::TextWrapped("%s", graphics_mod_path.c_str());
+    ImGui::Separator();
+    ImGui::TextWrapped("To add graphics mods, create subdirectories in the mods folder above. "
+                      "Each subdirectory should contain mod files like textures, models, or shaders.");
+  }
+  else
+  {
+    ImGui::Text("Available Graphics Mods:");
+    
+    if (ImGui::BeginChild("GraphicsModsList", ImVec2(0, 300), true))
+    {
+      for (const std::string& mod_dir : mod_directories)
+      {
+        if (mod_dir == "." || mod_dir == "..")
+          continue;
+          
+        std::string full_mod_path = graphics_mod_path + mod_dir;
+        if (!File::IsDirectory(full_mod_path))
+          continue;
+
+        ImGui::PushID(mod_dir.c_str());
+        
+        // Simple checkbox for enabling/disabling mods
+        // In a real implementation, this would check/modify mod configuration
+        static bool mod_enabled = true; // This would be per-mod state
+        if (ImGui::Checkbox("", &mod_enabled))
+        {
+          // Toggle mod enabled state
+        }
+        ImGui::SameLine();
+        
+        if (ImGui::TreeNode(mod_dir.c_str()))
+        {
+          // Show mod details
+          File::FSTEntry mod_root = File::ScanDirectoryTree(full_mod_path, false);
+          std::vector<std::string> mod_files;
+          
+          for (const auto& entry : mod_root.children)
+          {
+            if (!entry.isDirectory)
+            {
+              mod_files.push_back(entry.physicalName);
+            }
+          }
+          
+          ImGui::Text("Files: %zu", mod_files.size());
+          
+          // Count different file types
+          int texture_count = 0, model_count = 0, shader_count = 0;
+          for (const std::string& file : mod_files)
+          {
+            std::string filename, ext;
+            SplitPath(file, nullptr, &filename, &ext);
+            if (ext == ".png" || ext == ".dds" || ext == ".tga")
+              texture_count++;
+            else if (ext == ".obj" || ext == ".dae" || ext == ".fbx")
+              model_count++;
+            else if (ext == ".glsl" || ext == ".hlsl" || ext == ".shader")
+              shader_count++;
+          }
+          
+          if (texture_count > 0)
+            ImGui::BulletText("Textures: %d", texture_count);
+          if (model_count > 0)
+            ImGui::BulletText("Models: %d", model_count);
+          if (shader_count > 0)
+            ImGui::BulletText("Shaders: %d", shader_count);
+            
+          ImGui::Separator();
+          if (ImGui::Button("Open Mod Folder"))
+          {
+            // Open file explorer to this mod's directory
+          }
+          ImGui::SameLine();
+          if (ImGui::Button("Delete Mod"))
+          {
+            ImGui::OpenPopup("Delete Mod Confirm");
+          }
+          
+          // Delete confirmation modal
+          if (ImGui::BeginPopupModal("Delete Mod Confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+          {
+            ImGui::Text("Are you sure you want to delete the mod '%s'?", mod_dir.c_str());
+            ImGui::Text("This action cannot be undone.");
+            
+            if (ImGui::Button("Delete"))
+            {
+              File::DeleteDirRecursively(full_mod_path);
+              ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+              ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+          }
+          
+          ImGui::TreePop();
+        }
+        
+        ImGui::PopID();
+      }
+    }
+    ImGui::EndChild();
+  }
+
+  ImGui::Separator();
+  
+  // Control buttons
+  if (ImGui::Button("Open Mods Folder"))
+  {
+    // Open file explorer to the graphics mods directory
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Refresh Mods List"))
+  {
+    // Refresh the mod directories list
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Install Mod"))
+  {
+    ImGui::OpenPopup("Install Graphics Mod");
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Help"))
+  {
+    ImGui::OpenPopup("Graphics Mods Help");
+  }
+
+  // Install mod modal
+  if (ImGui::BeginPopupModal("Install Graphics Mod", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Install Graphics Mod");
+    ImGui::Separator();
+    
+    static char mod_name[256] = "";
+    static char mod_path[512] = "";
+    
+    ImGui::InputText("Mod Name", mod_name, sizeof(mod_name));
+    ImGui::InputText("Mod Archive Path", mod_path, sizeof(mod_path));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse"))
+    {
+      // File dialog for selecting mod archive
+    }
+    
+    ImGui::TextWrapped("Supported formats: ZIP, RAR, 7Z");
+    
+    if (ImGui::Button("Install"))
+    {
+      if (strlen(mod_name) > 0 && strlen(mod_path) > 0)
+      {
+        // Extract mod archive to graphics mods directory
+        std::string target_path = graphics_mod_path + mod_name + "/";
+        File::CreateDir(target_path);
+        // Extraction logic would go here
+        
+        mod_name[0] = '\0';
+        mod_path[0] = '\0';
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  // Help modal
+  if (ImGui::BeginPopupModal("Graphics Mods Help", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Graphics Mods Help");
+    ImGui::Separator();
+    
+    ImGui::TextWrapped("Graphics mods allow you to enhance the visual quality of games by:");
+    ImGui::BulletText("Replacing textures with higher resolution versions");
+    ImGui::BulletText("Adding new models and geometry");
+    ImGui::BulletText("Applying custom shaders and effects");
+    
+    ImGui::Separator();
+    ImGui::Text("Installation:");
+    ImGui::BulletText("Create a folder named after your mod in the graphics mods directory");
+    ImGui::BulletText("Place mod files in the appropriate subdirectories");
+    ImGui::BulletText("Enable graphics mods in the settings");
+    
+    ImGui::Separator();
+    ImGui::Text("Mod Directory: %s", graphics_mod_path.c_str());
+    
+    if (ImGui::Button("Close"))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+}
+
+#ifdef USE_RETRO_ACHIEVEMENTS
+
+// Simple spinner function
+void DrawSpinner(const char* label, float radius, float thickness, ImU32 color)
+{
+  ImGuiWindow* window = ImGui::GetCurrentWindow();
+  if (window->SkipItems)
+    return;
+
+  ImGuiContext& g = *GImGui;
+  const ImGuiStyle& style = g.Style;
+  const ImGuiID id = window->GetID(label);
+
+  ImVec2 pos = window->DC.CursorPos;
+  ImVec2 size((radius) * 2, (radius + style.FramePadding.y) * 2);
+
+  const ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
+  ImGui::ItemSize(bb, style.FramePadding.y);
+  if (!ImGui::ItemAdd(bb, id))
+    return;
+
+  // Render
+  window->DrawList->PathClear();
+
+  int num_segments = 30;
+  int start = abs(ImSin(g.Time * 1.8f) * (num_segments - 5));
+
+  const float a_min = IM_PI * 2.0f * ((float)start) / (float)num_segments;
+  const float a_max = IM_PI * 2.0f * ((float)num_segments - 3) / (float)num_segments;
+
+  const ImVec2 centre = ImVec2(pos.x + radius, pos.y + radius + style.FramePadding.y);
+
+  for (int i = 0; i < num_segments; i++)
+  {
+    const float a = a_min + ((float)i / (float)num_segments) * (a_max - a_min);
+    window->DrawList->PathLineTo(ImVec2(centre.x + ImCos(a + g.Time * 8) * radius,
+                                       centre.y + ImSin(a + g.Time * 8) * radius));
+  }
+
+  window->DrawList->PathStroke(color, false, thickness);
+}
+
+void CreatePropertiesAchievementsTab(UIState* state)
+{
+  if (!state->propertiesGame)
+    return;
+
+#ifdef _WIN32
+  static bool debug_logged = false;
+  if (!debug_logged)
+  {
+    OutputDebugStringA(("CreatePropertiesAchievementsTab called for: " + state->propertiesGame->GetFilePath() + "\n").c_str());
+    debug_logged = true;
+  }
+#endif
+
+  auto& achievement_manager = AchievementManager::GetInstance();
+  
+  // Check if user is logged in
+  if (!achievement_manager.HasAPIToken())
+  {
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Not logged in to RetroAchievements");
+    ImGui::Separator();
+    ImGui::TextWrapped("To view achievements for this game, please log in to RetroAchievements "
+                      "in the General settings tab.");
+    
+    ImGui::Spacing();
+    if (ImGui::Button("Open Settings"))
+    {
+      state->showSettingsWindow = true;
+    }
+    return;
+  }
+
+  // Show login status
+  auto* user_info = rc_client_get_user_info(achievement_manager.GetClient());
+  if (user_info)
+  {
+    ImGui::Text("Logged in as: %s", user_info->display_name);
+    if (user_info->score > 0)
+      ImGui::Text("RetroAchievements Score: %u", user_info->score);
+  }
+  else
+  {
+    ImGui::Text("Logged in to RetroAchievements");
+  }
+  
+  ImGui::Separator();
+
+  std::string game_id = state->propertiesGame->GetGameID();
+  std::string file_path = state->propertiesGame->GetFilePath();
+  
+  // Check if this is the currently loaded game (fastest path)
+  rc_client_t* client = achievement_manager.GetClient();
+  if (client && achievement_manager.IsGameLoaded())
+  {
+    auto* game_info = rc_client_get_game_info(client);
+    if (game_info && game_info->id != 0 && rc_client_has_achievements(client))
+    {
+      // Get detailed achievement data for loaded game
+      rc_client_achievement_list_t* achievement_list = rc_client_create_achievement_list(
+          client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
+          RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+          
+      if (achievement_list)
+      {
+        int total_achievements = 0;
+        int unlocked_achievements = 0;
+        
+        for (u32 bx = 0; bx < achievement_list->num_buckets; bx++)
+        {
+          auto& bucket = achievement_list->buckets[bx];
+          for (u32 achievement = 0; achievement < bucket.num_achievements; achievement++)
+          {
+            total_achievements++;
+            
+            const rc_client_achievement_t* achievement_info = bucket.achievements[achievement];
+            if (achievement_info && achievement_info->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED)
+              unlocked_achievements++;
+          }
+        }
+        
+        if (total_achievements > 0)
+        {
+          ImGui::Text("Game: %s", game_info->title);
+          ImGui::Text("Achievements: %d/%d (%d%%)", unlocked_achievements, total_achievements, 
+                      total_achievements > 0 ? (unlocked_achievements * 100) / total_achievements : 0);
+          ImGui::Separator();
+          
+          // Show detailed achievement list
+          ImGui::Text("Achievement Details:");
+          ImGui::Separator();
+          
+          if (ImGui::BeginChild("AchievementsList", ImVec2(0, 300), true))
+          {
+            for (u32 bx = 0; bx < achievement_list->num_buckets; bx++)
+            {
+              auto& bucket = achievement_list->buckets[bx];
+              
+              // Show bucket header if there are multiple buckets
+              if (achievement_list->num_buckets > 1)
+              {
+                ImGui::Text("--- %s ---", bucket.label);
+                ImGui::Separator();
+              }
+              
+              for (u32 a = 0; a < bucket.num_achievements; a++)
+              {
+                const rc_client_achievement_t* achievement = bucket.achievements[a];
+                if (!achievement)
+                  continue;
+                  
+                ImGui::PushID(achievement->id);
+                
+                // Achievement icon/status
+                bool is_unlocked = (achievement->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
+                ImVec4 color = is_unlocked ? ImVec4(0.0f, 1.0f, 0.0f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+                
+                // Show achievement status icon
+                ImGui::TextColored(color, is_unlocked ? "[✓]" : "[ ]");
+                ImGui::SameLine();
+                
+                if (ImGui::TreeNode(achievement->title))
+                {
+                  ImGui::TextWrapped("Description: %s", achievement->description);
+                  ImGui::Text("Points: %u", achievement->points);
+                  
+                  if (is_unlocked && achievement->unlock_time > 0)
+                  {
+                    // Format unlock time
+                    time_t unlock_time = achievement->unlock_time;
+                    struct tm* tm_info = localtime(&unlock_time);
+                    char time_buffer[80];
+                    strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", tm_info);
+                    ImGui::Text("Unlocked: %s", time_buffer);
+                  }
+                  
+                  // Show rarity if available
+                  if (achievement->rarity > 0.0f)
+                  {
+                    ImGui::Text("Rarity: %.2f%% of players", achievement->rarity);
+                  }
+                  
+                  ImGui::TreePop();
+                }
+                
+                ImGui::PopID();
+              }
+            }
+          }
+          ImGui::EndChild();
+        }
+        else
+        {
+          ImGui::Text("This game has no achievements available.");
+        }
+        
+        rc_client_destroy_achievement_list(achievement_list);
+      }
+      else
+      {
+        ImGui::Text("Error loading achievement details.");
+      }
+    }
+    else
+    {
+      ImGui::Text("This game has no achievements available.");
+    }
+  }
+  else
+  {
+    // Game is not currently loaded - use async browsing
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    
+    auto it = g_game_achievement_cache.find(game_id);
+    if (it == g_game_achievement_cache.end() || !it->second)
+    {
+      // Start loading achievement data
+      g_game_achievement_cache[game_id] = std::make_unique<GameAchievementData>();
+      
+      // Start async loading
+      std::thread(LoadAchievementDataForGame, file_path, game_id).detach();
+      
+      ImGui::Text("Loading achievement data...");
+      DrawSpinner("##loading_achievements", 8.0f, 2.0f, ImGui::GetColorU32(ImGuiCol_ButtonHovered));
+    }
+    else if (it->second->loading)
+    {
+      ImGui::Text("Loading achievement data...");
+      DrawSpinner("##loading_achievements", 8.0f, 2.0f, ImGui::GetColorU32(ImGuiCol_ButtonHovered));
+    }
+    else if (it->second->loaded)
+    {
+      if (it->second->hasAchievements)
+      {
+        ImGui::Text("Game: %s", it->second->gameTitle.c_str());
+        ImGui::Text("Total Achievements: %zu", it->second->achievements.size());
+        ImGui::Text("Note: Unlock status only shown for loaded games");
+        ImGui::Separator();
+        
+        ImGui::Text("Achievement Details:");
+        ImGui::Separator();
+        
+        if (ImGui::BeginChild("AchievementsList", ImVec2(0, 300), true))
+        {
+          for (const auto& achievement : it->second->achievements)
+          {
+            ImGui::PushID(achievement.id);
+            
+            // All achievements appear locked in browse mode
+            ImVec4 color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+            
+            ImGui::TextColored(color, "[ ]");
+            ImGui::SameLine();
+            
+            if (ImGui::TreeNode(achievement.title))
+            {
+              ImGui::TextWrapped("Description: %s", achievement.description);
+              ImGui::Text("Points: %u", achievement.points);
+              
+              if (achievement.author)
+              {
+                ImGui::Text("Author: %s", achievement.author);
+              }
+              
+              // Show rarity if available
+              if (achievement.rarity > 0.0f)
+              {
+                ImGui::Text("Rarity: %.2f%% of players", achievement.rarity);
+              }
+              
+              // Show type
+              const char* type_str = "Standard";
+              switch (achievement.type)
+              {
+                case RC_ACHIEVEMENT_TYPE_PROGRESSION: type_str = "Progression"; break;
+                case RC_ACHIEVEMENT_TYPE_WIN: type_str = "Win Condition"; break;
+                case RC_ACHIEVEMENT_TYPE_MISSABLE: type_str = "Missable"; break;
+              }
+              ImGui::Text("Type: %s", type_str);
+              
+              ImGui::TreePop();
+            }
+            
+            ImGui::PopID();
+          }
+        }
+        ImGui::EndChild();
+      }
+      else
+      {
+        if (!it->second->errorMessage.empty())
+        {
+          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Error: %s", it->second->errorMessage.c_str());
+        }
+        else
+        {
+          ImGui::Text("This game has no achievements available on RetroAchievements.");
+        }
+      }
+    }
+    else
+    {
+      if (!it->second->errorMessage.empty())
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Error: %s", it->second->errorMessage.c_str());
+      }
+      else
+      {
+        ImGui::Text("This game has no achievements available.");
+      }
+      
+      if (ImGui::Button("Retry"))
+      {
+        g_game_achievement_cache.erase(game_id);
+      }
+    }
+  }
+  
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::Spacing();
+  
+  // Links and actions
+  if (ImGui::Button("Open RetroAchievements Website"))
+  {
+    // Open RetroAchievements website
+    // Platform-specific code would go here
+  }
+  
+  ImGui::SameLine();
+  if (ImGui::Button("Refresh Achievement Data"))
+  {
+#ifdef _WIN32
+    OutputDebugStringA(("Refresh Achievement Data clicked for game: " + game_id + "\n").c_str());
+#endif
+    // Clear cache for this game to force refresh
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    g_game_achievement_cache.erase(game_id);
+  }
+}
+#endif  // USE_RETRO_ACHIEVEMENTS
 
 }  // namespace ImGuiFrontend

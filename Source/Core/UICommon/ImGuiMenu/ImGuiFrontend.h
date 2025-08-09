@@ -31,6 +31,17 @@ enum SelectedTab
   Achievements
 };
 
+enum PropertiesTab
+{
+  Info,
+  GameConfig,
+  Patches,
+  ARCodes,
+  GeckoCodes,
+  GraphicsMods,
+  PropertiesAchievements
+};
+
 enum ThemeBG
 {
   BG_All = 1,
@@ -60,6 +71,7 @@ public:
   bool controlsDisabled = false;
   bool showSettingsWindow = false;
   bool showListView = false;
+  bool showPropertiesWindow = false;
   bool menuPressed = false;
   std::string selectedPath;
   SelectedTab selectedTab = General;
@@ -76,6 +88,9 @@ public:
   std::unique_ptr<ciface::Core::InputDetector> mappingInputDetector;
   // Deferred boot parameters (Wii/GC system menu)
   std::unique_ptr<BootParameters> pending_boot_params;
+  // Properties dialog state
+  PropertiesTab selectedPropertiesTab = Info;
+  std::shared_ptr<UICommon::GameFile> propertiesGame = nullptr;
   int wiimote_extension = 0;
   bool wiimote_motionplus = false;
   float wiimote_speaker_pan = 0.0f;
@@ -157,6 +172,19 @@ private:
   AbstractTexture* GetOrCreateMissingTex();
   AbstractTexture* GetHandleForGame(std::shared_ptr<UICommon::GameFile> game);
   std::shared_ptr<AbstractTexture> CreateCoverTexture(std::shared_ptr<UICommon::GameFile> game);
+  
+  // Enhanced carousel functions
+  void UpdateCarouselAnimation(float delta_time);
+  void DrawCarouselItem(std::shared_ptr<UICommon::GameFile> game, int index, int center_index, float base_x, float base_y);
+  void DrawGameInfo(std::shared_ptr<UICommon::GameFile> game);
+  void DrawCarouselBackground();
+  float GetCarouselItemPosition(int index, int center_index);
+  float GetCarouselItemScale(int index, int center_index);
+  float GetCarouselItemAlpha(int index, int center_index);
+  void SmoothScrollToGame(int target_index);
+  
+  // RetroAchievements functions
+  std::pair<int, int> GetAchievementCountsForGame(const std::string& file_path);
 
   std::vector<std::shared_ptr<ciface::Core::Device>> m_controllers;
   std::vector<std::shared_ptr<UICommon::GameFile>> m_games;
@@ -180,12 +208,42 @@ private:
   std::vector<std::shared_ptr<UICommon::GameFile>> m_list_search_results;
   char m_list_search_buf[32]{};
 
+  // Enhanced carousel system
+  float m_carousel_scroll_offset = 0.0f;
+  float m_target_scroll_offset = 0.0f;
+  float m_carousel_animation_speed = 8.0f;
+  bool m_carousel_smooth_scrolling = true;
+  int m_carousel_visible_items = 7;  // Show more games (3 left, 1 center, 3 right)
+  float m_carousel_item_spacing = 200.0f;
+  float m_carousel_selected_scale = 1.3f;
+  float m_carousel_unselected_scale = 0.8f;
+  
+  // Game info display
+  bool m_show_game_info = true;
+  float m_game_info_fade_alpha = 1.0f;
+  float m_game_selection_timer = 0.0f;  // Timer for tracking how long user has been on current game
+  std::string m_current_game_description;
+  
+  // Enhanced visual effects
+  bool m_carousel_show_reflections = true;
+  bool m_carousel_show_shadows = true;
+  float m_carousel_reflection_alpha = 0.3f;
+  float m_carousel_shadow_offset = 8.0f;
+
 #ifdef USE_RETRO_ACHIEVEMENTS
   Config::ConfigChangedCallbackID m_config_changed_callback_id;
 #endif  // USE_RETRO_ACHIEVEMENTS
 };
 
 void DrawSettingsMenu(UIState* state, float frame_scale);
+void DrawPropertiesDialog(UIState* state, float frame_scale);
+void CreatePropertiesInfoTab(UIState* state);
+void CreatePropertiesGameConfigTab(UIState* state);
+void CreatePropertiesPatchesTab(UIState* state);
+void CreatePropertiesARCodesTab(UIState* state);
+void CreatePropertiesGeckoCodesTab(UIState* state);
+void CreatePropertiesGraphicsModsTab(UIState* state);
+void CreatePropertiesAchievementsTab(UIState* state);
 void CreateGeneralTab(UIState* state);
 void CreateInterfaceTab(UIState* state);
 void CreateGraphicsTab(UIState* state);
