@@ -21,7 +21,9 @@ extern const Info<bool> MAIN_FOCUSED_HOTKEYS;
 extern const Info<bool> MAIN_RECURSIVE_ISO_PATHS;
 extern const Info<std::string> MAIN_CURRENT_STATE_PATH;
 extern const Info<std::string> FRONTEND_SELECTED_THEME;
+extern const Info<std::string> FRONTEND_SELECTED_BACKGROUND;
 extern const Info<int> FRONTEND_COLOR_THEME;
+extern const Info<int> FRONTEND_GAME_TITLE_COLOR;
 extern const Info<int> FRONTEND_LAST_CATEGORY;
 extern const Info<int> FRONTEND_LAST_GAME;
 

@@ -541,8 +541,8 @@ void DrawInGameMenu()
       ImGui::EndTabBar();
     }
 
-    ImGui::End();
   }
+  ImGui::End();
 }
 
 void SetObscuredPixelsLeft(int width)

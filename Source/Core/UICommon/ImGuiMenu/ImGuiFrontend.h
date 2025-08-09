@@ -138,6 +138,18 @@ private:
   std::string m_name;
 };
 
+class FrontendBackground
+{
+public:
+  std::shared_ptr<AbstractTexture> GetTexture() { return m_texture; }
+  bool TryLoad(std::string path);
+  std::string GetName() { return m_name; }
+
+private:
+  std::shared_ptr<AbstractTexture> m_texture;
+  std::string m_name;
+};
+
 class ImGuiFrontend
 {
 public:
@@ -161,6 +173,8 @@ private:
   void FilterGamesForCategory();
   void LoadThemes();
   void RecurseForThemes(std::string path);
+  void LoadBackgrounds();
+  void RecurseForBackgrounds(std::string path);
   void RecurseFolderForGames(std::string path);
   void AddGameFolder(std::string path);
   bool TryInput(std::string expression, std::shared_ptr<ciface::Core::Device> device);
@@ -173,7 +187,6 @@ private:
   AbstractTexture* GetHandleForGame(std::shared_ptr<UICommon::GameFile> game);
   std::shared_ptr<AbstractTexture> CreateCoverTexture(std::shared_ptr<UICommon::GameFile> game);
   
-  // Enhanced carousel functions
   void UpdateCarouselAnimation(float delta_time);
   void DrawCarouselItem(std::shared_ptr<UICommon::GameFile> game, int index, int center_index, float base_x, float base_y);
   void DrawGameInfo(std::shared_ptr<UICommon::GameFile> game);
@@ -203,28 +216,25 @@ private:
 
   std::vector<std::shared_ptr<UICommon::GameFile>> m_displayed_games;
   CarouselCategory m_last_category =
-      CarouselCategory::CCount;  // Default to CCount to trigger an update
+      CarouselCategory::CCount;
   std::string m_prev_list_search;
   std::vector<std::shared_ptr<UICommon::GameFile>> m_list_search_results;
   char m_list_search_buf[32]{};
 
-  // Enhanced carousel system
   float m_carousel_scroll_offset = 0.0f;
   float m_target_scroll_offset = 0.0f;
   float m_carousel_animation_speed = 8.0f;
   bool m_carousel_smooth_scrolling = true;
-  int m_carousel_visible_items = 7;  // Show more games (3 left, 1 center, 3 right)
-  float m_carousel_item_spacing = 200.0f;
-  float m_carousel_selected_scale = 1.3f;
-  float m_carousel_unselected_scale = 0.8f;
+  int m_carousel_visible_items = 5;
+  float m_carousel_item_spacing = 300.0f;
+  float m_carousel_selected_scale = 1.06f;
+  float m_carousel_unselected_scale = 0.80f;
   
-  // Game info display
   bool m_show_game_info = true;
   float m_game_info_fade_alpha = 1.0f;
-  float m_game_selection_timer = 0.0f;  // Timer for tracking how long user has been on current game
+  float m_game_selection_timer = 0.0f;
   std::string m_current_game_description;
   
-  // Enhanced visual effects
   bool m_carousel_show_reflections = true;
   bool m_carousel_show_shadows = true;
   float m_carousel_reflection_alpha = 0.3f;

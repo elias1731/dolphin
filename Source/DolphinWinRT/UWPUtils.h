@@ -146,12 +146,35 @@ inline winrt::fire_and_forget OpenWADPicker()
   openPicker.FileTypeFilter().Append(L".wad");
 
   auto file = co_await openPicker.PickSingleFileAsync();
-  if (file)
-  {
-    std::string path = winrt::to_string(file.Path().data());
-    Core::RunOnCPUThread(
-        Core::System::GetInstance(), [path]() { WiiUtils::InstallWAD(path); }, false);
-  }
+  if (!file)
+    co_return;
+
+  std::string path = winrt::to_string(file.Path().data());
+  Core::RunOnCPUThread(Core::System::GetInstance(), [path]() { WiiUtils::InstallWAD(path); }, false);
+}
+
+inline winrt::fire_and_forget OpenNANDBinPicker(
+    std::function<void(std::string)> filePickedCallback)
+{
+  FileOpenPicker openPicker;
+  openPicker.ViewMode(PickerViewMode::List);
+  openPicker.SuggestedStartLocation(PickerLocationId::HomeGroup);
+  openPicker.FileTypeFilter().Append(L".bin");
+
+  auto file = co_await openPicker.PickSingleFileAsync();
+  filePickedCallback(file ? winrt::to_string(file.Path().data()) : "");
+}
+
+inline winrt::fire_and_forget OpenBootMiiKeysPicker(
+    std::function<void(std::string)> filePickedCallback)
+{
+  FileOpenPicker openPicker;
+  openPicker.ViewMode(PickerViewMode::List);
+  openPicker.SuggestedStartLocation(PickerLocationId::HomeGroup);
+  openPicker.FileTypeFilter().Append(L".bin");
+
+  auto file = co_await openPicker.PickSingleFileAsync();
+  filePickedCallback(file ? winrt::to_string(file.Path().data()) : "");
 }
 
 inline winrt::fire_and_forget

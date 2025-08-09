@@ -77,6 +77,7 @@
 #define RESOURCES_DIR "Resources"
 #define THEMES_DIR "Themes"
 #define STYLES_DIR "Styles"
+#define BACKGROUNDS_DIR "Backgrounds"
 #define GBASAVES_DIR "Saves"
 #define ANAGLYPH_DIR "Anaglyph"
 #define PASSIVE_DIR "Passive"

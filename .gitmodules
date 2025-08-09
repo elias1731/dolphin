@@ -21,7 +21,6 @@
 [submodule "SDL"]
 	path = Externals/SDL/SDL
 	url = https://github.com/SternXD/SDL3-uwp.git
-	branch = uwp-3.2.18
 	shallow = true
 [submodule "Externals/zlib-ng/zlib-ng"]
 	path = Externals/zlib-ng/zlib-ng
