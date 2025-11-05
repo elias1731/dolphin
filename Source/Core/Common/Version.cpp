@@ -21,7 +21,11 @@ using namespace winrt::Windows::ApplicationModel;
 
 namespace Common
 {
+#ifdef WINRT_XBOX
 #define EMULATOR_NAME "DolphinUWP"
+#else
+#define EMULATOR_NAME "Dolphin"
+#endif
 
 #ifdef _DEBUG
 #define BUILD_TYPE_STR "Debug "
