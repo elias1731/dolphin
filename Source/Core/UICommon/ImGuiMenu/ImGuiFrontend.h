@@ -1,5 +1,7 @@
 #pragma once
 
+#include <imgui.h>
+
 #include <memory>
 #include "Core/Boot/Boot.h"
 #include "Core/TitleDatabase.h"
@@ -170,6 +172,8 @@ private:
   std::shared_ptr<UICommon::GameFile> CreateGameList();
 
   void LoadGameList();
+  void BeginLoadGameListAsync();
+  void DrawLoadingOverlay();
   void FilterGamesForCategory();
   void LoadThemes();
   void RecurseForThemes(std::string path);
@@ -240,33 +244,50 @@ private:
   float m_carousel_reflection_alpha = 0.3f;
   float m_carousel_shadow_offset = 8.0f;
 
+  // Async loading state for game list
+  std::atomic<bool> m_is_loading_games{false};
+  std::atomic<size_t> m_loading_current{0};
+  std::atomic<size_t> m_loading_total{0};
+  std::thread m_loading_thread;
+
 #ifdef USE_RETRO_ACHIEVEMENTS
   Config::ConfigChangedCallbackID m_config_changed_callback_id;
 #endif  // USE_RETRO_ACHIEVEMENTS
 };
 
-void DrawSettingsMenu(UIState* state, float frame_scale);
-void DrawPropertiesDialog(UIState* state, float frame_scale);
-void CreatePropertiesInfoTab(UIState* state);
-void CreatePropertiesGameConfigTab(UIState* state);
-void CreatePropertiesPatchesTab(UIState* state);
-void CreatePropertiesARCodesTab(UIState* state);
-void CreatePropertiesGeckoCodesTab(UIState* state);
-void CreatePropertiesGraphicsModsTab(UIState* state);
-void CreatePropertiesAchievementsTab(UIState* state);
-void CreateGeneralTab(UIState* state);
-void CreateInterfaceTab(UIState* state);
-void CreateGraphicsTab(UIState* state);
-void CreateControlsTab(UIState* state);
-void CreateGameCubeTab(UIState* state);
-void CreateWiiTab(UIState* state);
-void CreateAdvancedTab(UIState* state);
-void CreatePathsTab(UIState* state);
-void CreateAudioTab(UIState* state);
-void CreateAchievementsTab(UIState* state);
-void DrawAchievementsWindow(UIState* state);
-void CreateWiiPort(int index, std::vector<std::string> devices);
-void CreateGCPort(int index, std::vector<std::string> devices);
+  void DrawSettingsMenu(UIState* state, float frame_scale);
+  void DrawPropertiesDialog(UIState* state, float frame_scale);
+  void CreatePropertiesInfoTab(UIState* state);
+  void CreatePropertiesGameConfigTab(UIState* state);
+  void CreatePropertiesPatchesTab(UIState* state);
+  void CreatePropertiesARCodesTab(UIState* state);
+  void CreatePropertiesGeckoCodesTab(UIState* state);
+  void CreatePropertiesGraphicsModsTab(UIState* state);
+  void CreatePropertiesAchievementsTab(UIState* state);
+  void CreateGeneralTab(UIState* state);
+  void CreateInterfaceTab(UIState* state);
+  void CreateGraphicsTab(UIState* state);
+  void CreateControlsTab(UIState* state);
+  void CreateGameCubeTab(UIState* state);
+  void CreateWiiTab(UIState* state);
+  void CreateAdvancedTab(UIState* state);
+  void CreatePathsTab(UIState* state);
+  void CreateAudioTab(UIState* state);
+  void CreateAchievementsTab(UIState* state);
+  void ApplyColorTheme(int theme_index);
+  void ApplyModernStyling();
+  bool StyledButton(const char* label, const ImVec2& size = ImVec2(0, 0), ImGuiButtonFlags flags = 0);
+  bool PrimaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+  bool SecondaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+  bool DangerButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+  extern std::vector<std::string> m_paths;
+  extern bool m_show_path_warning;
+  extern float m_frame_scale;
+  extern std::map<std::string, FrontendTheme> m_themes;
+  extern FrontendTheme* m_selected_theme;
+  void DrawAchievementsWindow(UIState* state);
+  void CreateWiiPort(int index, std::vector<std::string> devices);
+  void CreateGCPort(int index, std::vector<std::string> devices);
 
 std::shared_ptr<AbstractTexture> CreateTextureFromPath(std::string path,
                                                        bool is_theme_asset = false);

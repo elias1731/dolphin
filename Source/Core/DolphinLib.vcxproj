@@ -89,6 +89,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="UICommon\ImGuiMenu\ImGuiFrontend.cpp" />
+    <ClCompile Include="UICommon\ImGuiMenu\ImGuiFrontend_Settings.cpp" />
     <ClCompile Include="UICommon\ImGuiMenu\ImGuiMappingWindow.cpp" />
     <ClCompile Include="UICommon\ImGuiMenu\ImGuiNetplay.cpp" />
     <ClCompile Include="UICommon\ImGuiMenu\WinRTKeyboard.cpp" />
