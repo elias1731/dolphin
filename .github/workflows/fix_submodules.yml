@@ -1,0 +1,32 @@
+name: "📦 Repair broken Submodule(s)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository (without submodules)
+        uses: actions/checkout@v4
+
+      - name: Remove old submodule and add new one
+        run: |
+          git config user.name "[🤖Bot]Submodule Fix"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git rm -f Externals/lunasvg || true
+          rm -rf Externals/lunasvg
+
+          if [ -f .gitmodules ]; then
+            git config -f .gitmodules --remove-section submodule.Externals/lunasvg || true
+            git add .gitmodules
+          fi
+
+          git submodule add https://github.com/SternXD/lunasvg Externals/lunasvg
+
+          git commit -m "[🔧FIX] Re-add broken submodule(s)"
+          git push origin ${{ github.ref_name }}
