@@ -1,7 +1,6 @@
 # DolphinUWP - A GameCube and Wii Emulator
 
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/elias1731/dolphin/buildwinrt.yml)
-[![Discord Server](https://img.shields.io/discord/1007582798598647889?color=%235CA8FA&label=Xbox%20Emulation%20Hub&logo=discord&logoColor=white)]([https://discord.com/invite/emulation-collective-1007582798598647889](https://discord.gg/emulation-collective-1007582798598647889))
+[![Latest release](https://badgen.net/github/release/elias1731/dolphin)](https://github.com/elias1731/dolphin/releases)  ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/elias1731/dolphin/build_dev.yml) 
 
 Dolphin is an emulator for running GameCube and Wii games on Windows,
 Linux, macOS, recent Android devices, and UWP/Xbox (Because of this fork). It's licensed under the terms

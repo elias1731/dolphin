@@ -40,7 +40,8 @@ static void RestartCore(const std::weak_ptr<HW::GBA::Core>& core, std::string_vi
       [core, rom_path = std::string(rom_path)] {
         if (auto core_ptr = core.lock())
         {
-          auto& info = Config::MAIN_GBA_ROM_PATHS[core_ptr->GetCoreInfo().device_number];
+#ifdef HAS_LIBMGBA
+          const auto& info = MAIN_GBA_ROM_PATHS[core_ptr->GetCoreInfo().device_number];
           core_ptr->Stop();
           Config::SetCurrent(info, rom_path);
           auto& system = Core::System::GetInstance();
@@ -49,6 +50,7 @@ static void RestartCore(const std::weak_ptr<HW::GBA::Core>& core, std::string_vi
             return;
           Config::SetCurrent(info, Config::GetBase(info));
           core_ptr->Start(core_timing.GetTicks());
+#endif
         }
       },
       false);
